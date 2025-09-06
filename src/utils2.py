@@ -6,7 +6,7 @@ import torch
 
 import math
 
-def compute_uot_plans(X, t_train, delta=1, draw=False):
+def compute_uot_plans(X, t_train, delta=1, use_mini_batch_uot=False, group_number=5, draw=False):
     uot_plans = []
     gamma0_plans = []
     gamma1_plans = []
@@ -17,27 +17,46 @@ def compute_uot_plans(X, t_train, delta=1, draw=False):
         n_source, n_target = X_source.shape[0], X_target.shape[0] 
         norm_2_dist = ot.dist(X_source, X_target, metric='euclidean')
 
-        # # 应用公式计算成本矩阵
-        # angle = norm_2_dist / (2 * delta)
-        # angle = np.minimum(angle, np.pi/2)  # 限制在[0, π/2]范围内
-        # cos_val = np.cos(angle)
-        # cos_sq = cos_val ** 2
-        # # 避免对数计算中的零值（用一个小正数替换零）
-        # cos_plus_sq = np.where(cos_sq == 0, 1e-10, cos_sq)
-        # # 最终成本矩阵
-        # cost_matrix = -np.log(cos_plus_sq)
-
         cos_sq = np.cos(np.minimum(norm_2_dist / (2 * delta), np.pi/2))**2
         cost_matrix = -np.log(np.where(cos_sq == 0, 1e-10, cos_sq))
 
-        a = np.ones(n_source)
-        b = np.ones(n_target)
 
-        G = ot.unbalanced.mm_unbalanced(a, b, cost_matrix, reg_m=[1.0,1.0])
+        if not use_mini_batch_uot:
+            a = np.ones(n_source)
+            b = np.ones(n_target)
+            G = ot.unbalanced.mm_unbalanced(a, b, cost_matrix, reg_m=[1.0,1.0])
+        else:
+            # Mini-batch UOT computation
+            a = np.ones(n_source)
+            b = np.ones(n_target)
+            G = np.zeros((n_source, n_target))
+
+            # 先打乱索引
+            source_perm = np.arange(n_source)
+            np.random.shuffle(source_perm)
+            target_perm = np.arange(n_target)
+            np.random.shuffle(target_perm)
+
+            # 然后随机划分
+            source_indices = np.array_split(source_perm, group_number)
+            target_indices = np.array_split(target_perm, group_number)
+
+            # for src_idx in source_indices:
+            #     for tgt_idx in target_indices:
+            for src_idx,tgt_idx in zip(source_indices,target_indices):
+                    sub_cost_matrix = cost_matrix[np.ix_(src_idx, tgt_idx)]
+                    sub_a = a[src_idx]
+                    sub_b = b[tgt_idx]
+                    G_sub = ot.unbalanced.mm_unbalanced(sub_a, sub_b, sub_cost_matrix, reg_m=[1.0,1.0])
+                    G[np.ix_(src_idx, tgt_idx)] = G_sub
+
+
+        gamma0_plan = ((a / G.sum(1))[:, None]) * G
+        gamma1_plan = (b/G.sum(0))*G
 
         uot_plans.append(G)
-        gamma0_plans.append(((a / G.sum(1))[:, None]) * G)
-        gamma1_plans.append((b/G.sum(0))*G)
+        gamma0_plans.append(gamma0_plan)
+        gamma1_plans.append(gamma1_plan)
 
         print(((gamma1_plans[i]- gamma0_plans[i])<0).any())
         
@@ -85,7 +104,7 @@ def sample_map(pi: np.ndarray, batch_size: int = 256, replace: bool = True):
 
 
 def sample_from_ot_plan(ot_plan: np.ndarray, x0: torch.Tensor, x1: torch.Tensor, batch_size: int = 256):
-    i, j = sample_map(ot_plan, batch_size, replace=False)
+    i, j = sample_map(ot_plan, batch_size, replace=True)
     return x0[i], x1[j], i, j  # 只返回索引 i
 
 def compute_xt_ut_gt(t_relative, delta_t, x0, x1, mass0, mass1, delta):
@@ -131,7 +150,7 @@ def compute_xt_ut_gt(t_relative, delta_t, x0, x1, mass0, mass1, delta):
 
     ut_samp = omega / masst_samp * (1/delta_t)
 
-    return xt_samp, gt_samp, ut_samp, index
+    return xt_samp, gt_samp, ut_samp, masst_samp/mass0, index
 
 
 def get_batch(X, t_train, batch_size, gamma0_plans, gamma1_plans, delta, ratios):
@@ -139,6 +158,7 @@ def get_batch(X, t_train, batch_size, gamma0_plans, gamma1_plans, delta, ratios)
     xts = []
     uts = []
     gts = []
+    massts = []
     
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     for t in range(len(t_train)-1): 
@@ -161,11 +181,12 @@ def get_batch(X, t_train, batch_size, gamma0_plans, gamma1_plans, delta, ratios)
         t_relative = torch.rand(x0.shape[0], 1).type_as(x0)
         t_samp = delta_t*t_relative
 
-        xt_samp, gt_samp, ut_samp, index = compute_xt_ut_gt(t_relative, delta_t, x0, x1, mass0, mass1, delta)
+        xt_samp, gt_samp, ut_samp, masst_samp, index = compute_xt_ut_gt(t_relative, delta_t, x0, x1, mass0, mass1, delta)
         
         ts.append(t_samp[index] + t_train[t])
         xts.append(xt_samp)
         uts.append(ut_samp)
         gts.append(gt_samp)
+        massts.append(masst_samp)
     
-    return torch.cat(ts), torch.cat(xts), torch.cat(uts), torch.cat(gts)
+    return torch.cat(ts), torch.cat(xts), torch.cat(uts), torch.cat(gts), torch.cat(massts)

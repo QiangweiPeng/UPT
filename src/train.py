@@ -31,6 +31,8 @@ def pretrain(model, df, optimizer, n_epoch=1000, test_interval=100,
     save_dir=None,
     relative_mass=None,
     delta=1.0,
+    use_mini_batch = False,
+    group_number=5,
 ):
     print('relative_mass',relative_mass)
     time_labels = df['samples'].to_numpy()
@@ -41,7 +43,8 @@ def pretrain(model, df, optimizer, n_epoch=1000, test_interval=100,
     print('t_train:', t_train)
     logger.info('Begin flow and growth matching')
 
-    _, gamma0_plans, gamma1_plans = compute_uot_plans(X_selected, t_train, delta=delta, draw=False)
+    _, gamma0_plans, gamma1_plans = compute_uot_plans(X_selected, t_train, delta=delta, draw=False,
+                                                      use_mini_batch_uot=use_mini_batch, group_number=group_number)
     progress_bar = tqdm(range(n_epoch), desc="Begin flow and growth matching...", unit="epoch")
     vloss_list = []
     gloss_list = []
@@ -49,7 +52,7 @@ def pretrain(model, df, optimizer, n_epoch=1000, test_interval=100,
 
     for i in progress_bar:
         optimizer.zero_grad()
-        t, xt, ut, gt = get_batch(X_selected, t_train, batch_size, gamma0_plans, gamma1_plans, delta, relative_mass)
+        t, xt, ut, gt, masst = get_batch(X_selected, t_train, batch_size, gamma0_plans, gamma1_plans, delta, relative_mass)
         vt = model.v_net(t,xt)
         gt_pred = model.g_net(t,xt)
 
@@ -57,9 +60,11 @@ def pretrain(model, df, optimizer, n_epoch=1000, test_interval=100,
         # print(torch.isnan(xt).any())
         # print('---')
 
-        vloss = torch.mean((vt - ut)**2)
+        vloss = torch.mean((vt - ut)**2 * masst)
+        # vloss = torch.mean((vt - ut)**2)
         vloss_list.append(vloss.item())
-        gloss = torch.mean((gt_pred - gt)**2)
+        gloss = torch.mean((gt_pred - gt)**2 * masst)
+        # gloss = torch.mean((gt_pred - gt)**2)
         gloss_list.append(gloss.item())
         loss = vloss + gloss
         loss_list.append(loss.item())
