@@ -1,3 +1,13 @@
-1. 将ot的结果保存成稀疏矩阵，节约内存，加快取batch时候的采样。也许可以在归一化前就设置个阈值把特别小的直接mask掉。
-2. 现在训练的时候v的loss不降低，另外很容易出现nan。推测可能的原因是condition也需要通过神经网络来学习导致的。一个检查的方法时不学condition直接用，以及单独取出某个扰动来看看能不能学好。
-3.当前用于计算配对的是X_pca，根根据这个挑选的delta，实际训练的时候选用的是缩放后的X_pca。
+1. 其他的数据集？
+2. 其他的embedding方式 目前是PCA
+3. ot plan参数调整 ot plan对结果应该很重要，这一点我搞的不是特别清楚，可能需要讨论一下
+4. 模型架构/参数调整
+5. inference代码写成真正的batch形式
+6. 更多的下游evaluation 测评
+
+目前流程:
+train和test针对基因分层抽样（测试分布内是否学的准），针对基因分割train test的逻辑有写，还未测试
+在control上计算pca 以此为基准将train和test project到改pca空间，并根据control来scale
+训练 模型架构见src/train/model.py （train loss可以稳定下降，test loss似乎1000轮后基本不降）
+从control细胞出发进行inference，得到的pca结果根据之前算的control可以映射会基因空间
+evaluation基本没怎么写，简单让ai写了一些

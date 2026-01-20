@@ -1,0 +1,8 @@
+WFRFM/data/raw/*
+WFRFM/data/processed/vcc_ot*
+WFRFM/results/checkpoints/*
+WFRFM/results/figures/*
+**/.ipynb_checkpoints/
+
+**/__pycache__/
+.DS_Store
