@@ -10,9 +10,10 @@ from tqdm import tqdm
 
     
 
-def compute_uot_plan_gpu(X_source, X_target, delta=1, reg_m=1, use_mini_batch_uot=False, group_number=5):
+def compute_uot_plan_gpu(X_source, X_target, delta=1, reg_m=1, use_mini_batch_uot=False, group_number=5,draw=False):
     """
     如果数据量大了cpu跑不动 需要gpu版本
+    mini_batch代实现
     """
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -23,23 +24,17 @@ def compute_uot_plan_gpu(X_source, X_target, delta=1, reg_m=1, use_mini_batch_uo
             X_target = torch.from_numpy(X_target).float().to(device)
 
         n_source, n_target = X_source.shape[0], X_target.shape[0]
-
-        # 3. 计算距离 (POT 库支持 GPU Tensor)
         norm_2_dist = ot.dist(X_source, X_target, metric='euclidean')
 
-        # 4. 计算 Cost Matrix (全部在 GPU 完成)
         limit = torch.tensor(np.pi/2, device=device)
         term = torch.clamp(norm_2_dist / (2 * delta), max=limit)
         cos_sq = torch.cos(term)**2
         
-        # 释放距离矩阵，腾出显存
         del norm_2_dist 
         
         epsilon = torch.tensor(1e-10, device=device)
         cost_matrix = -torch.log(torch.where(cos_sq == 0, epsilon, cos_sq))
 
-        # 5. 求解 Unbalanced OT
-        # 设置 numItermax 防止某些极端情况死循环
         if not use_mini_batch_uot:
             a = torch.ones(n_source, device=device)
             b = torch.ones(n_target, device=device)
@@ -48,8 +43,6 @@ def compute_uot_plan_gpu(X_source, X_target, delta=1, reg_m=1, use_mini_batch_uo
             pass
             # 后面再写
         
-
-        # 6. 计算 Marginal Plans
         sum_1 = G.sum(1, keepdim=True)
         sum_1 = torch.where(sum_1 == 0, torch.tensor(1.0, device=device), sum_1)
         
@@ -59,14 +52,36 @@ def compute_uot_plan_gpu(X_source, X_target, delta=1, reg_m=1, use_mini_batch_uo
         gamma0_plan = (a.view(-1, 1) / sum_1) * G
         gamma1_plan = (b.view(1, -1) / sum_0) * G
 
-        # 7. 转回 CPU Numpy 并立即释放 GPU Tensor
+
+        if draw:
+            import matplotlib.pyplot as plt
+
+            source_pred = G.sum(1)          # (n_source,)
+            target_pred = G.sum(0)          # (n_target,)
+            a_np = a.detach().cpu().numpy()
+            b_np = b.detach().cpu().numpy()
+            sum1_np = sum_1.squeeze(1).detach().cpu().numpy()  # (n_source,)
+            sum0_np = sum_0.squeeze(0).detach().cpu().numpy()  # (n_target,)
+
+            fig = plt.figure(figsize=(15, 5))
+            plt.subplot(121)
+            plt.plot(a_np, label='1')
+            plt.plot(sum1_np, label='sum_i_give')
+            plt.legend()
+        
+            plt.subplot(122)
+            plt.plot(b_np, label='1')
+            plt.plot(sum0_np, label='sum_j_receive')
+            plt.legend()
+
+            plt.show()
+        
+
         res_G = G.cpu().numpy()
         res_g0 = gamma0_plan.cpu().numpy()
         res_g1 = gamma1_plan.cpu().numpy()
 
-    # 清理所有 GPU 临时变量
     del X_source, X_target, cost_matrix, G, gamma0_plan, gamma1_plan
-    # 强制清理显存缓存
     torch.cuda.empty_cache()
 
     return res_G, res_g0, res_g1
@@ -81,11 +96,21 @@ def pre_compute_wfr_ot(adata_control,
                        reg_m=1,
                        use_mini_batch_uot=True, 
                        group_number=5,
-                       batch_save_size=10): 
+                       batch_save_size=10,
+                        draw = False): 
+    """
+    让ai写了一个断点重连逻辑
+    另外把result中储存方式改成了字典
+    """
     
     X_control = adata_control.obsm[sample_rep]
+    control_obs_names = adata_control.obs_names.to_numpy()
     all_conditions = adata_treated.obs[condition_keys].unique().tolist()
     threshold = 1e-6
+
+    grouped_indices = adata_treated.obs.groupby(condition_keys).indices 
+    X_treated_all = adata_treated.obsm[sample_rep] 
+    obs_names_treated_all = adata_treated.obs_names.to_numpy()
     
     # 检查已完成的batch
     batch_dir = os.path.dirname(save_path) or '.'
@@ -106,26 +131,25 @@ def pre_compute_wfr_ot(adata_control,
         
         # 每个batch独立的结果字典
         batch_results = {
-            "all_conditions": [], 
-            "control_obs_names": adata_control.obs_names.to_numpy(),
-            "treat_obs_names": [],
-            "uot_plans": [],
-            "gamma0_plans": [],
-            "gamma1_plans": [],
-            "delta": delta
+            "uot_plans": {},      # {condition: sparse_matrix}
+            "gamma0_plans": {},   # {condition: sparse_matrix}
+            "gamma1_plans": {},   # {condition: sparse_matrix}
+            "treat_obs_names": {} # {condition: [obs_names]}
         }
         
         # 处理当前batch
         for i in tqdm(range(batch_start, batch_end)):
             cur_condition = all_conditions[i]
-            adata_treat_cur = adata_treated[adata_treated.obs[condition_keys]==cur_condition]
-            X_treat_cur = adata_treat_cur.obsm[sample_rep]
+            indices = grouped_indices[cur_condition]
+            X_treat_cur = X_treated_all[indices]
+            obs_names_cur = obs_names_treated_all[indices]
             
             gamma, g0, g1 = compute_uot_plan_gpu(
                 X_control, X_treat_cur, 
                 delta=delta, reg_m = reg_m,
                 use_mini_batch_uot=use_mini_batch_uot, 
-                group_number=group_number
+                group_number=group_number,
+                draw = draw
             )
             
             if hasattr(gamma, 'cpu'):
@@ -134,14 +158,14 @@ def pre_compute_wfr_ot(adata_control,
                 g1 = g1.cpu().numpy()
                 torch.cuda.empty_cache()
             
-            batch_results["uot_plans"].append(sparse.csr_matrix(gamma * (gamma >= threshold)))
-            batch_results["gamma0_plans"].append(sparse.csr_matrix(g0 * (g0 >= threshold)))
-            batch_results["gamma1_plans"].append(sparse.csr_matrix(g1 * (g1 >= threshold)))
-            batch_results["treat_obs_names"].append(adata_treat_cur.obs_names.to_numpy())
-            batch_results["all_conditions"].append(cur_condition)
+            batch_results["uot_plans"][cur_condition] = sparse.csr_matrix(gamma * (gamma >= threshold))
+            batch_results["gamma0_plans"][cur_condition] = sparse.csr_matrix(g0 * (g0 >= threshold))
+            batch_results["gamma1_plans"][cur_condition] = sparse.csr_matrix(g1 * (g1 >= threshold))
+            batch_results["treat_obs_names"][cur_condition] = obs_names_cur
             
-            del gamma, g0, g1, X_treat_cur, adata_treat_cur
-            gc.collect()
+            del gamma, g0, g1, X_treat_cur
+
+        gc.collect()
         
         # 保存batch并清空内存
         batch_path = os.path.join(batch_dir, f"{base_name}_batch_{batch_end}.pkl")
@@ -155,13 +179,13 @@ def pre_compute_wfr_ot(adata_control,
     # 合并所有batch到最终结果
     print("合并所有batch...")
     final_results = {
-        "all_conditions": [], 
-        "control_obs_names": adata_control.obs_names.to_numpy(),
-        "treat_obs_names": [],
-        "uot_plans": [],
-        "gamma0_plans": [],
-        "gamma1_plans": [],
-        "delta": delta
+        "all_conditions": all_conditions, 
+        "control_obs_names": control_obs_names,
+        "delta": delta,
+        "uot_plans": {},
+        "gamma0_plans": {},
+        "gamma1_plans": {},
+        "treat_obs_names": {}
     }
     
     batch_files = sorted([f for f in os.listdir(batch_dir) 
@@ -171,8 +195,9 @@ def pre_compute_wfr_ot(adata_control,
     for batch_file in batch_files:
         with open(os.path.join(batch_dir, batch_file), 'rb') as f:
             batch_data = pickle.load(f)
-        for key in ["uot_plans", "gamma0_plans", "gamma1_plans", "treat_obs_names", "all_conditions"]:
-            final_results[key].extend(batch_data[key])
+        for key in ["uot_plans", "gamma0_plans", "gamma1_plans", "treat_obs_names"]:
+            if key in batch_data:
+                final_results[key].update(batch_data[key])
         del batch_data
         gc.collect()
     

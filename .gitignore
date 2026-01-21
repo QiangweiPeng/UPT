@@ -5,3 +5,7 @@ WFRFM/results/figures/*
 **/.ipynb_checkpoints/
 **/__pycache__/
 .DS_Store
+**/jupyter.log
+!WFRFM/data/raw/.gitkeep
+!WFRFM/results/checkpoints/.gitkeep
+!WFRFM/results/figures/.gitkeep

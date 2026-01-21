@@ -1,7 +1,46 @@
 import torch
 import random
 import numpy as np
-from scipy import sparse  # 必须引入这个库
+from scipy import sparse  
+
+class DataLoaderHelper:
+    """
+    这是一个辅助类，用来存储训练所需的静态数据
+    避免在 get_batch 循环里反复查找 adata
+    """
+    def __init__(self, adata_control, adata_treated, 
+                 precomputed_results, 
+                 sample_rep='X_pca_scaled',
+                 condition_keys="target_gene",
+                 condition_rep_keys="gene_embeddings"):
+        
+        self.X_control = adata_control.obsm[sample_rep]
+        self.X_treated_all = adata_treated.obsm[sample_rep]
+
+        self.condition_emb_map = {}
+        unique_cons = adata_treated.obs[condition_keys].unique()
+        
+        df = adata_treated.obs[[condition_keys]]
+        for con in unique_cons:
+            idx = np.where(adata_treated.obs[condition_keys] == con)[0][0]
+            self.condition_emb_map[con] = adata_treated.obsm[condition_rep_keys][idx]
+            
+
+        self.treated_indices_map = adata_treated.obs.groupby(condition_keys).indices
+
+        # utils里改成了字典
+        self.gamma0_plans = precomputed_results["gamma0_plans"]
+        self.gamma1_plans = precomputed_results["gamma1_plans"]
+        self.delta = precomputed_results["delta"]
+        
+        self.all_conditions = list(self.gamma0_plans.keys())
+        
+        print("data_loaded")
+
+
+def sample_from_ot_plan(ot_plan, x0, x1, batch_size = 256):
+    i, j = sample_map(ot_plan, batch_size, replace=True)
+    return x0[i], x1[j], i, j  # 只返回索引 i
 
 def sample_map(pi, batch_size, replace=True):
     """
@@ -13,11 +52,8 @@ def sample_map(pi, batch_size, replace=True):
         pi_coo = pi.tocoo()
         probs = pi_coo.data / pi_coo.data.sum()
         sampled_idx = np.random.choice(len(probs), size=batch_size, p=probs, replace=replace)
-        
-
         return pi_coo.row[sampled_idx], pi_coo.col[sampled_idx]
 
-    # 兼容 numpy
     else:
         n_source, n_target = pi.shape
         flat_pi = pi.flatten()
@@ -35,10 +71,6 @@ def sample_map(pi, batch_size, replace=True):
         
         return i, j
 
-
-def sample_from_ot_plan(ot_plan: np.ndarray, x0: torch.Tensor, x1: torch.Tensor, batch_size: int = 256):
-    i, j = sample_map(ot_plan, batch_size, replace=True)
-    return x0[i], x1[j], i, j  # 只返回索引 i
 
 def compute_xt_ut_gt(t_samp, x0, x1, mass0, mass1, delta):
 
@@ -102,56 +134,65 @@ def compute_xt_ut_gt(t_samp, x0, x1, mass0, mass1, delta):
 
     return xt_samp, gt_samp, ut_samp, masst_samp/mass0, index
 
-# def get_batch(X, t_train, batch_size, gamma0_plans, gamma1_plans, delta, ratios):
-def get_batch(adata_control, adata_treated, all_conditions, batch_size_per_condition, 
-              batch_size_condition, gamma0_plans, gamma1_plans, delta, 
-              sample_rep = "X_pca", # X_ae; X_state
-              control_key = "is_control",
-              condition_keys = "target_gene",
-              condition_rep_keys = "gene_embeddings",
-              device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")):
-    ts = []
-    xts = []
-    uts = []
-    gts = []
-    massts = []
-    cons = []
+
+def get_batch(helper, #  DataLoaderHelper 
+              batch_size_per_condition, 
+              batch_size_condition, 
+              delta, 
+              device):
+    """
+    我们把adata在dataloader中预取 在get_batch中便可以对numpy切片
+    """
+
+    ts, xts, uts, gts, massts, cons = [], [], [], [], [], []
     
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    X_control = adata_control.obsm[sample_rep]
-    
-    sample_conditions_index = random.sample(range(len(all_conditions)), batch_size_condition)
-    for i in range(len(sample_conditions_index)):        
-               
-        cur_con_index = sample_conditions_index[i]
-        cur_con = all_conditions[cur_con_index]
-        cur_adata_treated = adata_treated[adata_treated.obs[condition_keys]==cur_con]
-
-        gamma0_plan = gamma0_plans[cur_con_index]
-        gamma1_plan = gamma1_plans[cur_con_index]
-
+    sample_con_names = random.sample(helper.all_conditions, batch_size_condition)
+    for cur_con in sample_con_names:
+        gamma0_plan = helper.gamma0_plans[cur_con]
+        gamma1_plan = helper.gamma1_plans[cur_con]
         
-        x0, x1, idx_0, idx_1 = sample_from_ot_plan(gamma0_plan, X_control, cur_adata_treated.obsm[sample_rep], batch_size_per_condition)
-
-        x0 = torch.from_numpy(x0).float().to(device)
-        x1 = torch.from_numpy(x1).float().to(device)
-
-        mass0 = torch.from_numpy(gamma0_plan[idx_0, idx_1].reshape(-1, 1)).float().to(device)
-        mass1 = torch.from_numpy(gamma1_plan[idx_0, idx_1].reshape(-1, 1)).float().to(device)
+        global_indices = helper.treated_indices_map[cur_con]
+        X_treated_cur = helper.X_treated_all[global_indices]
         
+        x0, x1, idx_0, idx_1 = sample_from_ot_plan(
+            gamma0_plan, 
+            helper.X_control, 
+            X_treated_cur, 
+            batch_size_per_condition
+        )
+        
+        x0_tensor = torch.from_numpy(x0).float().to(device)
+        x1_tensor = torch.from_numpy(x1).float().to(device)
 
-        t_samp = torch.rand(x0.shape[0], 1).type_as(x0)
-
-        xt_samp, gt_samp, ut_samp, masst_samp, index = compute_xt_ut_gt(t_samp, x0, x1, mass0, mass1, delta)
-
+        if sparse.issparse(gamma0_plan):
+            m0_val = np.asarray(gamma0_plan[idx_0, idx_1]).reshape(-1, 1)
+        else:
+            m0_val = gamma0_plan[idx_0, idx_1].reshape(-1, 1)
+        if sparse.issparse(gamma1_plan):
+            m1_val = np.asarray(gamma1_plan[idx_0, idx_1]).reshape(-1, 1)
+        else:
+            m1_val = gamma1_plan[idx_0, idx_1].reshape(-1, 1)
+        
+        mass0 = torch.from_numpy(m0_val).float().to(device)
+        mass1 = torch.from_numpy(m1_val).float().to(device)
+        
+        t_samp = torch.rand(x0_tensor.shape[0], 1, device=device)
+        
+        xt_samp, gt_samp, ut_samp, masst_samp, index = compute_xt_ut_gt(
+            t_samp, x0_tensor, x1_tensor, mass0, mass1, delta
+        )
+        
         ts.append(t_samp[index])
         xts.append(xt_samp)
         uts.append(ut_samp)
         gts.append(gt_samp)
         massts.append(masst_samp)
+        
+        cur_emb_np = helper.condition_emb_map[cur_con]
+        cur_con_tensor = torch.tensor(cur_emb_np, dtype=torch.float32, device=device)
+        cur_con_tensor = cur_con_tensor.unsqueeze(0).repeat(len(xt_samp), 1)
+        
+        cons.append(cur_con_tensor)
 
-        cur_con = cur_adata_treated.obsm[condition_rep_keys][0, :]
-        cur_con = torch.tensor(cur_con, dtype=torch.float32).repeat(len(xt_samp), 1).to(device)
-        cons.append(cur_con)
-    
-    return torch.cat(ts), torch.cat(xts), torch.cat(uts), torch.cat(gts), torch.cat(massts), torch.cat(cons)
+    return (torch.cat(ts), torch.cat(xts), torch.cat(uts), 
+            torch.cat(gts), torch.cat(massts), torch.cat(cons))
