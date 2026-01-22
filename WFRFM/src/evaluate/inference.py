@@ -131,90 +131,65 @@ def batch_reconstruct_pca(
 
 def batch_reconstruct_scvi(
     inference_results: dict,     
-    scvi_model,                  # 传入训练好的 scVI 模型对象 (model_ref)
-    target_library_size: float = 1e4, # 用于标准化表达量，类似 normalize_total
+    scvi_model,                  # 传入训练好的 scVI 模型对象
+    target_library_size: float = 1e4, # 用于标准化表达量 (Normalized Count)
     store_as_anndata: bool = True,
-    batch_idx: int = 0           # 默认投射到第0个Batch (即 Control/Reference Batch)
+    batch_idx = None           
 ) -> dict:
     """
     输入: 'TP53': {'z_pred': [n_particles, n_latent], 'm_pred': [n_particles, 1]}
-    输出: {'TP53': AnnData(X=gene_expression)}
+    输出: {'TP53': AnnData(X=normalized_gene_expression)}
+    
+    逻辑:
+    1. 计算: X = px_scale * target_library_size (忽略 m_pred 对数值的影响)
+    2. 存储: 将 m_pred 存入 obs['mass'] 和 uns 中 (保留元数据)
     """
     
-    # 1. 准备模型状态
-    # 确保模型在评估模式 (不更新权重)
     scvi_model.module.eval()
-    device = scvi_model.device  # 获取模型所在的设备 (GPU/CPU)
-    
-    # 获取基因名称
+    device = scvi_model.device 
     var_names = scvi_model.adata.var_names
     
     reconstructed_dict = {}
-
-    # 不需要像 PCA 那样读取 mean/var，因为这些都在神经网络的权重里
     
     for cond_name, result_dict in tqdm(inference_results.items()):
-        # 2. 准备输入数据 (转换为 PyTorch Tensor 并移至 GPU)
-        z_pred = result_dict['z_pred'] # scVI 的 z 不需要再缩放，它本身就是标准化的
-        m_pred = result_dict['m_pred'] # 这里假设 m_pred 是 log_library_size 或者 raw library size
+        z_pred = result_dict['z_pred'] 
+        m_pred = result_dict['m_pred']
 
-        # 转换为 Tensor
         z_tensor = torch.tensor(z_pred, dtype=torch.float32, device=device)
-        
-        # 构造 Batch Index (全为0，模拟映射回 Control Batch)
         n_obs = z_pred.shape[0]
-        batch_index = torch.full((n_obs, 1), batch_idx, dtype=torch.long, device=device)
+
+        if batch_idx is None:
+            batch_idx = torch.full((n_obs, 1), 0, dtype=torch.long, device=device)
         
-        # 处理 Library Size (m_pred)
-        # scVI 的 generative 函数通常需要 library 参数
-        # 你的 m_pred 如果是 mass (total counts)，scVI 内部通常需要 log(total_counts)
-        # 为了获得“标准化”后的表达量 (Normalized Expression)，我们通常不使用 m_pred，
-        # 而是让模型输出 px_scale (即基因表达概率)，然后乘以一个固定的 target_sum (如 10,000)
-        # 这样得到的表达量是可以直接对比的，消除了测序深度的影响。
-        
-        # 这里我们需要传入一个假的 library 占位符给 generative 函数，
-        # 因为我们主要想要它的 'px_scale' 输出。
         library_tensor = torch.zeros((n_obs, 1), device=device) 
 
-        # 3. 通过解码器 (Generative Pass)
         with torch.no_grad():
-            # 调用 scVI 的生成过程
-            # generative 返回: {'px_scale': ..., 'px_r': ..., 'px_rate': ..., 'px_dropout': ...}
-            # 注意：不同版本的 scvi-tools 参数可能略有不同，但通常只需 z, library, batch_index
             outputs = scvi_model.module.generative(
                 z=z_tensor, 
                 library=library_tensor, 
-                batch_index=batch_index
+                batch_index=batch_idx  
             )
-            
-            # px_scale 是 softmax 后的结果 (基因表达比例，sum=1)
-            # 这相当于去除了 library size 影响的“纯”表达谱
-            px_scale = outputs["px_scale"]
-            
-            # 还原到指定测序深度 (类似 Scanpy 的 normalize_total(1e4))
-            # 这样输出的数据都在同一个尺度上
+            px = outputs["px"]
+            px_scale = px.scale
+
             X_recon_tensor = px_scale * target_library_size
             
-            # 这一步通常得到的是 "Denoised Normalized Counts"
-            # 如果你习惯看 log 空间的数据 (类似 PCA 的输出)，可以做 log1p
-            # X_recon_tensor = torch.log1p(X_recon_tensor) 
-            
-            # 转回 Numpy
             X_recon = X_recon_tensor.cpu().numpy()
 
-        # 4. 封装结果
         if store_as_anndata:
             new_ad = ad.AnnData(X=X_recon, dtype=np.float32)
             new_ad.var_names = var_names
             new_ad.obs['condition'] = cond_name
             
-            # 保留原始的 mass 信息供参考
-            if m_pred is not None:
-                new_ad.obs['mass'] = m_pred.flatten()
-                new_ad.uns['reconstruction_params'] = {
-                    'mean_mass': float(m_pred.mean()),
-                    'std_mass': float(m_pred.std()),
-                }
+            # 存入 m_pred 信息
+            new_ad.obs['mass'] = m_pred.flatten()
+            new_ad.uns['reconstruction_params'] = {
+                'target_library_size': target_library_size, # 记录一下你是用多少标准化的
+                'mean_mass': float(m_pred.mean()),
+                'std_mass': float(m_pred.std()),
+                'min_mass': float(m_pred.min()),
+                'max_mass': float(m_pred.max())
+            }
             
             reconstructed_dict[cond_name] = new_ad
         else:
