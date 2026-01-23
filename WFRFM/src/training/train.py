@@ -58,7 +58,7 @@ def train_model(adata_control, adata_treated, adata_test,
 
         vt, gt_pred = model(t, xt, cons)
 
-        vloss = torch.mean((vt - ut)**2 * masst)
+        vloss = torch.mean((vt - ut)**2 * masst)*10
         vloss_list.append(vloss.item())
         gloss = torch.mean((gt_pred - gt)**2 * masst)
         gloss_list.append(gloss.item())
@@ -86,7 +86,7 @@ def train_model(adata_control, adata_treated, adata_test,
                         device=device
                     )
                     vt_test, gt_pred_test = model(t_test, xt_test, cons_test)
-                    test_vloss = torch.mean((vt_test - ut_test)**2 * masst_test)
+                    test_vloss = torch.mean((vt_test - ut_test)**2 * masst_test)*10
                     test_vloss_list.append(test_vloss.item())
                     test_gloss = torch.mean((gt_pred_test - gt_test)**2 * masst_test)
                     test_gloss_list.append(test_gloss.item())
