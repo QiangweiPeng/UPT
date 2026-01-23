@@ -12,14 +12,9 @@ def draw_loss(load_path = None,eval_interval = 10,cut = 0):
     loss_list = checkpoint['loss_list'][cut:]   
     vloss_list = checkpoint['vloss_list'][cut:] 
     gloss_list = checkpoint['gloss_list'][cut:]
-    test_loss_list = checkpoint['test_loss_list'][cut:]
-    test_vloss_list = checkpoint['test_vloss_list'][cut:]
-    test_gloss_list = checkpoint['test_gloss_list'][cut:]
-
-    # length = len(test_loss_list)
-    # test_loss_new = np.full(eval_interval * length, np.nan)
-    # test_loss_new[eval_interval-1::eval_interval] = test_loss_list
-    # test_loss_list = test_loss_new
+    test_loss_list = checkpoint['test_loss_list'][cut//eval_interval:]
+    test_vloss_list = checkpoint['test_vloss_list'][cut//eval_interval:]
+    test_gloss_list = checkpoint['test_gloss_list'][cut//eval_interval:]
     
     
     print(f"训练步数: {len(loss_list)}")
@@ -54,11 +49,24 @@ def draw_loss(load_path = None,eval_interval = 10,cut = 0):
     plt.ylabel('Loss')
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.legend()
+
+    length = len(test_loss_list)
+    test_loss_new = np.full(eval_interval * length, np.nan)
+    test_loss_new[eval_interval-1::eval_interval] = test_loss_list
+    test_loss_list = test_loss_new
+    
+    # test_loss_new = np.full(eval_interval * length, np.nan)
+    # test_loss_new[eval_interval-1::eval_interval] = test_vloss_list
+    # test_vloss_list = test_loss_new
+
+    # test_loss_new = np.full(eval_interval * length, np.nan)
+    # test_loss_new[eval_interval-1::eval_interval] = test_gloss_list
+    # test_gloss_list = test_loss_new
     
     # train loss test loss
     plt.figure(figsize=(7, 5))
     plt.plot(loss_list, label='Total Train Loss', color='orange', alpha=0.7)
-    plt.plot(test_loss_list, label='Total Test Loss', color='blue', alpha=0.6)
+    plt.plot(test_loss_list, label='Total Test Loss', color='blue', alpha=0.6,marker='o', markersize=2)
     plt.title('Train vs Test Loss')
     plt.xlabel('Iteration')
     plt.ylabel('Loss')

@@ -42,7 +42,7 @@ def train_model(adata_control, adata_treated, adata_test,
         )
     
     progress_bar = tqdm(range(n_iterations), desc="Begin flow and growth matching...", unit="epoch")
-    vloss_list, gloss_list, loss_list, test_loss_list = [], [], [], []
+    vloss_list, gloss_list, loss_list, test_loss_list, test_vloss_list, test_gloss_list = [], [], [], [], [], []
     last_ckpt_path = None # 初始化变量
 
     for i in progress_bar:
@@ -62,7 +62,7 @@ def train_model(adata_control, adata_treated, adata_test,
         vloss_list.append(vloss.item())
         gloss = torch.mean((gt_pred - gt)**2 * masst)
         gloss_list.append(gloss.item())
-        loss = vloss + gloss*0.1
+        loss = vloss + gloss
         loss_list.append(loss.item())
 
 
@@ -86,15 +86,18 @@ def train_model(adata_control, adata_treated, adata_test,
                         device=device
                     )
                     vt_test, gt_pred_test = model(t_test, xt_test, cons_test)
-                    test_vloss = torch.mean((vt_test - ut_test)**2 * masst_test)
+                    test_vloss = torch.mean((vt_test - ut_test)**2 * masst_test) *10
+                    test_vloss_list.append(test_vloss.item())
                     test_gloss = torch.mean((gt_pred_test - gt_test)**2 * masst_test)
-                    test_loss = test_vloss + test_gloss*0.1
+                    test_gloss_list.append(test_gloss.item())
+                    test_loss = test_vloss + test_gloss
                     test_loss_list.append(test_loss.item())
                     logging.info(f"Epoch {i}: loss={loss.item():.3f}, vloss={vloss.item():.3f}, gloss={gloss.item():.3f}, test_loss={test_loss.item():.3f}, test_vloss={test_vloss.item():.3f}, test_gloss={test_gloss.item():.3f}")
                     progress_bar.set_postfix({"loss": f"{loss.item():.3f}","vloss": f"{vloss.item():.3f}", 
                                               "gloss": f"{gloss.item():.3f}", "test_loss": f"{test_loss.item():.3f}"
-                                             , "test_vloss"={test_vloss.item():.3f}, test_gloss={test_gloss.item():.3f}})
+                                             , "test_vloss":f"{test_vloss.item():.3f}", "test_gloss":f"{test_gloss.item():.3f}"})
         else:
+            pass
             # logging.info(f"Epoch {i}: loss={loss.item():.3f}, vloss={vloss.item():.3f}, gloss={gloss.item():.3f}")
             # progress_bar.set_postfix({"loss": f"{loss.item():.3f}","vloss": f"{vloss.item():.3f}", "gloss": f"{gloss.item():.3f}"})
 
@@ -108,6 +111,8 @@ def train_model(adata_control, adata_treated, adata_test,
                     'gloss_list': gloss_list,
                     'loss_list': loss_list,
                     'test_loss_list': test_loss_list,
+                    'test_vloss_list': test_vloss_list,
+                    'test_gloss_list': test_gloss_list
                 }, ckpt_path)
                 logging.info(f"Model and training state saved to {ckpt_path}")
 
