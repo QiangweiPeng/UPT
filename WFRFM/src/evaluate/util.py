@@ -14,12 +14,12 @@ def draw_loss(load_path = None,eval_interval = 10,cut = 0):
     loss_list = checkpoint['loss_list'][cut:]   
     vloss_list = checkpoint['vloss_list'][cut:] 
     gloss_list = checkpoint['gloss_list'][cut:]
-    test_loss_list = checkpoint['test_loss_list'][cut//eval_interval:]
+    test_loss_list = checkpoint['test_loss_list'][cut:]
 
-    length = len(test_loss_list)
-    test_loss_new = np.full(eval_interval * length, np.nan)
-    test_loss_new[eval_interval-1::eval_interval] = test_loss_list
-    test_loss_list = test_loss_new
+    # length = len(test_loss_list)
+    # test_loss_new = np.full(eval_interval * length, np.nan)
+    # test_loss_new[eval_interval-1::eval_interval] = test_loss_list
+    # test_loss_list = test_loss_new
     
     
     print(f"训练步数: {len(loss_list)}")
