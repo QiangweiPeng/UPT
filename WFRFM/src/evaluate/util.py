@@ -8,13 +8,13 @@ def draw_loss(load_path = None,eval_interval = 10,cut = 0):
     
 
     checkpoint = torch.load(load_path, map_location='cpu')
-
-    cut = cut
     
     loss_list = checkpoint['loss_list'][cut:]   
     vloss_list = checkpoint['vloss_list'][cut:] 
     gloss_list = checkpoint['gloss_list'][cut:]
     test_loss_list = checkpoint['test_loss_list'][cut:]
+    test_vloss_list = checkpoint['test_vloss_list'][cut:]
+    test_gloss_list = checkpoint['test_gloss_list'][cut:]
 
     # length = len(test_loss_list)
     # test_loss_new = np.full(eval_interval * length, np.nan)
@@ -27,6 +27,8 @@ def draw_loss(load_path = None,eval_interval = 10,cut = 0):
     print(f"最后一步 vLoss: {vloss_list[-1]:.6f}")
     print(f"最后一步 gLoss: {gloss_list[-1]:.6f}")
     print(f"最后一步 test_Loss: {test_loss_list[-1]:.6f}")
+    print(f"最后一步 test_vLoss: {test_vloss_list[-1]:.6f}")
+    print(f"最后一步 test_gLoss: {test_gloss_list[-1]:.6f}")
     
 
     plt.figure(figsize=(15, 5))
@@ -42,10 +44,21 @@ def draw_loss(load_path = None,eval_interval = 10,cut = 0):
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.legend()
     
-    # train loss test loss
+    # test loss vloss gloss
     plt.subplot(1, 2, 2)
+    plt.plot(test_loss_list, label='Total Test Loss', color='blue', alpha=0.6)
+    plt.plot(test_vloss_list, label='Velocity Loss (test)', color='orange', alpha=0.7)
+    plt.plot(test_gloss_list, label='Growth Loss (test)', color='green', alpha=0.7)
+    plt.title('Total Test Loss')
+    plt.xlabel('Iteration')
+    plt.ylabel('Loss')
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.legend()
+    
+    # train loss test loss
+    plt.figure(figsize=(7, 5))
     plt.plot(loss_list, label='Total Train Loss', color='orange', alpha=0.7)
-    plt.plot(test_loss_list, label='Total Test Loss', color='blue', alpha=0.6,marker='o', markersize=2)
+    plt.plot(test_loss_list, label='Total Test Loss', color='blue', alpha=0.6)
     plt.title('Train vs Test Loss')
     plt.xlabel('Iteration')
     plt.ylabel('Loss')
