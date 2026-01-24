@@ -5,7 +5,7 @@ import math
 class FiLMResBlock(nn.Module):
     def __init__(self, dim, con_dim, time_dim,bottle_dim=512, activation=None, dropout=0):
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim, elementwise_affine=False)
+        self.norm1 = nn.LayerNorm(dim, elementwise_affine=False) # 难道这里不能改成False？
        # self.norm2 = nn.LayerNorm(dim)
         
         self.fc1 = nn.Linear(dim, dim)
@@ -121,6 +121,8 @@ class FNet(nn.Module):
         self.condition_encoder = nn.Sequential(
             nn.LayerNorm(condition_dim),
             nn.Linear(condition_dim, hidden_dim_con),
+            self.activation,
+            nn.Linear(hidden_dim_con, hidden_dim_con),
             self.activation,
             nn.Linear(hidden_dim_con, hidden_dim_con),
             self.activation,

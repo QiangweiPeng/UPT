@@ -50,7 +50,7 @@ def run_batch_inference(
 ) -> dict:
     """
     输出: 一个字典 {'TP53': {'z_pred': [n_particles, embed_len], 'm_pred': [n_particles, 1]}, ...}
-    实际上这个函数不是batch形式的，后面再改
+    或许可以有perturb的batch之类
     还可以有混合精度优化之类的
     """
     model.eval()
