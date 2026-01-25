@@ -86,22 +86,23 @@ class FlatVIEmbedding:
         # 初始化GeometricNBVAE
         self.model = GeometricNBVAE(
             l2=True,
-            interpolate_z=False,
+            interpolate_z=False, #无需平滑生成路径
             eta_interp=0.1,
-            compute_metrics_every=50,
-            start_jac_after=int(max_epochs * 0.2),  # 20%后开始几何正则化
+            compute_metrics_every=500000,
+            start_jac_after=0,  
             vae_kwargs=vae_kwargs,
             use_c=True,
             detach_theta=True,
-            fl_weight=self.fl_weight,
+            fl_weight=0.01,
             trainable_c=False,
-            anneal_fl_weight=False,
-            max_fl_weight=None,
-            n_epochs_anneal_fl=None,
-            fl_anneal_fraction=None
+            anneal_fl_weight=True,
+            max_fl_weight=0.1,
+            n_epochs_anneal_fl= max_epochs,
+            fl_anneal_fraction=0.5
         )
         
         # 准备数据加载器
+       # 准备数据加载器
         from torch.utils.data import DataLoader, TensorDataset
         
         X_train = torch.FloatTensor(adata_train.X.toarray() if hasattr(adata_train.X, 'toarray') else adata_train.X)
@@ -110,15 +111,31 @@ class FlatVIEmbedding:
         train_dataset = TensorDataset(X_train)
         val_dataset = TensorDataset(X_val)
         
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, drop_last=True)
-        
-        # 包装为字典格式
+        # ✅ 正确的 collate_fn
         def collate_fn(batch):
-            return {"X": batch[0][0]}
+            # batch 是一个列表，每个元素是 (tensor,) 形式
+            # 需要堆叠所有样本
+            X_batch = torch.stack([item[0] for item in batch])
+            return {"X": X_batch}
         
-        train_loader.collate_fn = collate_fn
-        val_loader.collate_fn = collate_fn
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size, 
+            shuffle=True, 
+            num_workers=12,
+            drop_last=True,
+            collate_fn=collate_fn  # 通过参数传入
+        )
+        
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=batch_size, 
+            shuffle=False, 
+            num_workers=12,
+            drop_last=True,
+            collate_fn=collate_fn  # 通过参数传入
+        )
+
         
         # 配置callbacks
         callbacks = []

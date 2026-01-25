@@ -117,17 +117,18 @@ def process_to_embedding(adata_control, adata_train,
                 'device': 'cuda'
             }
         flatvi_model = FlatVIEmbedding(**flatvi_kwargs)
-        if os.path.exists(flatvi_save_path):
-            flatvi_model.load_model_weights(flatvi_save_path, in_dim=adata_control.n_vars)
+        model_path = f"{flatvi_save_path}/model.pt"
+        if os.path.exists(model_path):
+            flatvi_model.load_model_weights(model_path, in_dim=adata_control.n_vars)
         else:
             flatvi_model.train_model(
                 adata_control,
-                max_epochs=500,
+                max_epochs=20,
                 batch_size=256,
                 save_path=flatvi_save_path
             )
             if flatvi_save_path is not None:
-                flatvi_model.save_model(f"{flatvi_save_path}/flatvi_model.pt")
+                flatvi_model.save_model(model_path)
                 
         adata_control.obsm[sample_rep] = flatvi_model.get_latent_representation(adata_control)
         adata_train.obsm[sample_rep] = flatvi_model.get_latent_representation(adata_train)

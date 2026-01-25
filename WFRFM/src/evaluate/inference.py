@@ -199,3 +199,52 @@ def batch_reconstruct_scvi(
             }
             
     return reconstructed_dict
+
+
+
+# 在 src/evaluate/inference.py 中添加
+
+def batch_reconstruct_flatvi(
+    inference_results: dict,
+    flatvi_model,  # FlatVIEmbedding对象
+    store_as_anndata: bool = True
+) -> dict:
+    """
+    使用FlatVI decoder从潜在空间重构到基因空间
+    """
+    reconstructed_dict = {}
+    
+    for cond_name, result_dict in tqdm(inference_results.items()):
+        z_pred = result_dict['z_pred']
+        m_pred = result_dict['m_pred']
+        
+        # 使用FlatVI的decoder
+        with torch.no_grad():
+            z_tensor = torch.FloatTensor(z_pred).to(flatvi_model.device)
+            
+            # 解码
+            decoder_output = flatvi_model.model.decode(z_tensor)
+            decoder_output = flatvi_model.model._preprocess_decoder_output(
+                decoder_output, 
+                library_size=None
+            )
+            
+            # 获取重构的表达量（均值）
+            X_recon = decoder_output['mu'].cpu().numpy()
+        
+        if store_as_anndata:
+            new_ad = ad.AnnData(X=X_recon, dtype=np.float32)
+            new_ad.obs['condition'] = cond_name
+            new_ad.obs['mass'] = m_pred.flatten()
+            new_ad.uns['reconstruction_params'] = {
+                'mean_mass': float(m_pred.mean()),
+                'std_mass': float(m_pred.std())
+            }
+            reconstructed_dict[cond_name] = new_ad
+        else:
+            reconstructed_dict[cond_name] = {
+                'X': X_recon,
+                'mass': m_pred
+            }
+    
+    return reconstructed_dict
