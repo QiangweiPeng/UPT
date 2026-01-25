@@ -5,9 +5,11 @@ import matplotlib.pyplot as plt
 import anndata as ad
 import scanpy as sc
 import scvi
+import os
 
 from .utils import convert_mixed_array_to_2d
 from .pca import centered_pca, project_pca, reconstruct_pca
+from .flatvi_wrapper import FlatVIEmbedding
 
 def process_to_embedding(adata_control, adata_train, 
                          adata_test = None,
@@ -17,10 +19,12 @@ def process_to_embedding(adata_control, adata_train,
                          model_train = None,
                          model_test = None,
                          scvi_save_path = None,
+                         flatvi_save_path = None,
                          control_key = "is_control",
                          condition_keys = "target_gene",
                          condition_rep_keys = "gene_embeddings",
-                         condition_rep_dict = None):
+                         condition_rep_dict = None,
+                         flatvi_kwargs = None):
     """ Process data into embedding.
         centered_pca control group as standard.
     Args:
@@ -102,6 +106,40 @@ def process_to_embedding(adata_control, adata_train,
         print("Train Std:", np.std(adata_train.obsm[sample_rep], axis=0))
         if adata_test is not None:
             print("Test Std:", np.std(adata_test.obsm[sample_rep], axis=0))
+
+    elif sample_rep == "X_flatvi":
+        if flatvi_kwargs is None:
+            flatvi_kwargs = {
+                'n_latent': n_comps,
+                'hidden_dims': [512, 256, n_comps],
+                'fl_weight': 1.0,
+                'learning_rate': 1e-3,
+                'device': 'cuda'
+            }
+        flatvi_model = FlatVIEmbedding(**flatvi_kwargs)
+        if os.path.exists(flatvi_save_path):
+            flatvi_model.load_model_weights(flatvi_save_path, in_dim=adata_control.n_vars)
+        else:
+            flatvi_model.train_model(
+                adata_control,
+                max_epochs=500,
+                batch_size=256,
+                save_path=flatvi_save_path
+            )
+            if flatvi_save_path is not None:
+                flatvi_model.save_model(f"{flatvi_save_path}/flatvi_model.pt")
+                
+        adata_control.obsm[sample_rep] = flatvi_model.get_latent_representation(adata_control)
+        adata_train.obsm[sample_rep] = flatvi_model.get_latent_representation(adata_train)
+        if adata_test is not None:
+            adata_test.obsm[sample_rep] = flatvi_model.get_latent_representation(adata_test)
+            
+        print("Control Std:", np.std(adata_control.obsm[sample_rep], axis=0)[:5])
+        print("Train Std:", np.std(adata_train.obsm[sample_rep], axis=0)[:5])
+        if adata_test is not None:
+            print("Test Std:", np.std(adata_test.obsm[sample_rep], axis=0)[:5])
+        model_ref = flatvi_model
+        
         
     elif sample_rep == "??":
         raise ValueError("TODO")
