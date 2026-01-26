@@ -24,7 +24,8 @@ def process_to_embedding(adata_control, adata_train,
                          condition_keys = "target_gene",
                          condition_rep_keys = "gene_embeddings",
                          condition_rep_dict = None,
-                         flatvi_kwargs = None):
+                         flatvi_kwargs = None,
+                         device = "cuda"):
     """ Process data into embedding.
         centered_pca control group as standard.
     Args:
@@ -123,13 +124,14 @@ def process_to_embedding(adata_control, adata_train,
         else:
             flatvi_model.train_model(
                 adata_control,
-                max_epochs=20,
+                max_epochs=200,
                 batch_size=256,
                 save_path=flatvi_save_path
             )
             if flatvi_save_path is not None:
                 flatvi_model.save_model(model_path)
-                
+
+        flatvi_model.model.to(device)
         adata_control.obsm[sample_rep] = flatvi_model.get_latent_representation(adata_control)
         adata_train.obsm[sample_rep] = flatvi_model.get_latent_representation(adata_train)
         if adata_test is not None:

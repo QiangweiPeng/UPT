@@ -207,26 +207,34 @@ def batch_reconstruct_scvi(
 def batch_reconstruct_flatvi(
     inference_results: dict,
     flatvi_model,  # FlatVIEmbedding对象
-    store_as_anndata: bool = True
+    target_library_size=1e4,
+    store_as_anndata: bool = True,
+    var_names = None
 ) -> dict:
     """
     使用FlatVI decoder从潜在空间重构到基因空间
     """
     reconstructed_dict = {}
+    device = flatvi_model.device
     
     for cond_name, result_dict in tqdm(inference_results.items()):
         z_pred = result_dict['z_pred']
         m_pred = result_dict['m_pred']
+
+        batch_size = z_pred.shape[0]
         
         # 使用FlatVI的decoder
         with torch.no_grad():
             z_tensor = torch.FloatTensor(z_pred).to(flatvi_model.device)
             
             # 解码
+
+            lib_size_tensor = torch.full((batch_size,), float(target_library_size), device=device)
+
             decoder_output = flatvi_model.model.decode(z_tensor)
             decoder_output = flatvi_model.model._preprocess_decoder_output(
                 decoder_output, 
-                library_size=None
+                library_size=lib_size_tensor
             )
             
             # 获取重构的表达量（均值）
@@ -234,6 +242,7 @@ def batch_reconstruct_flatvi(
         
         if store_as_anndata:
             new_ad = ad.AnnData(X=X_recon, dtype=np.float32)
+            new_ad.var_names = var_names
             new_ad.obs['condition'] = cond_name
             new_ad.obs['mass'] = m_pred.flatten()
             new_ad.uns['reconstruction_params'] = {
