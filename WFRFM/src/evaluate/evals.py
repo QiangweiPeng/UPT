@@ -1,449 +1,468 @@
-import scanpy as sc
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.preprocessing import MinMaxScaler
-
-def plot_perturbation_umap(
-    results_embedding, 
-    adata_control, 
-    adata_conditions, 
-    target_genes, 
-    control_indices,   # 你代码里的 indices
-    condition_key="target_gene",
-    rep_key="X_pca_scaled", # 你的 source_rep
-    n_neighbors=30
-):
-    """
-    绘制 Control vs Real vs Predict 的 UMAP，并融合 m_pred 信息
-    """
-    
-    # 1. 获取 Control 数据 (所有基因共享)
-    # 注意：这里需要拿原始的numpy数据，不要tensor
-    X_control = adata_control.obsm[rep_key][control_indices]
-    
-    for gene in target_genes:
-        if gene not in results_embedding:
-            continue
-            
-        print(f"Plotting {gene}...")
-        
-        # 2. 获取 Real 数据
-        subset = adata_conditions[adata_conditions.obs[condition_key] == gene]
-        if subset.n_obs == 0:
-            print(f"No real data for {gene}")
-            continue
-        # 随机采样 Real 数据以避免点太多遮挡 (可选，这里设为跟control一样多或者全部)
-        idx_real = np.random.choice(range(subset.n_obs), size=min(subset.n_obs, len(control_indices)), replace=False)
-        X_real = subset.obsm[rep_key][idx_real]
-        
-        # 3. 获取 Predict 数据和 Mass
-        res = results_embedding[gene]
-        X_pred = res['z_pred']  # [n_particles, dim]
-        m_pred = res['m_pred'].flatten() # [n_particles,]
-        
-        # --- 数据预处理：构建联合 AnnData 做 UMAP ---
-        # 拼接数据矩阵
-        X_combined = np.vstack([X_control, X_real, X_pred])
-        
-        # 创建标签
-        labels = (
-            ['Control'] * len(X_control) + 
-            ['Real'] * len(X_real) + 
-            ['Predict'] * len(X_pred)
-        )
-        
-        # 创建临时 AnnData
-        adata_vis = sc.AnnData(X=X_combined)
-        adata_vis.obs['condition'] = labels
-        # 只要用原来的 rep 算 neighbor 即可，不需要再 PCA
-        # scanpy 的 neighbors 默认用 .X，如果我们直接把 pca 放入 .X，就不要再用 use_rep
-        sc.pp.neighbors(adata_vis, n_neighbors=n_neighbors, use_rep='X') 
-        sc.tl.umap(adata_vis)
-        
-        # 提取 UMAP 坐标
-        umap_coords = adata_vis.obsm['X_umap']
-        umap_ctrl = umap_coords[:len(X_control)]
-        umap_real = umap_coords[len(X_control):len(X_control)+len(X_real)]
-        umap_pred = umap_coords[len(X_control)+len(X_real):]
-        
-        # --- 可视化 ---
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-        
-        # === 图 1: 类别对比 (运用 m_pred 做 alpha) ===
-        ax = axes[0]
-        
-        # 画 Control (灰色背景)
-        ax.scatter(umap_ctrl[:, 0], umap_ctrl[:, 1], c='lightgrey', s=10, label='Control', alpha=0.5, rasterized=True)
-        
-        # 画 Real (橙色/红色目标)
-        ax.scatter(umap_real[:, 0], umap_real[:, 1], c='#d62728', s=15, label='Real', alpha=0.6, rasterized=True)
-        
-        # 画 Predict (蓝色，根据 mass 调整透明度)
-        # 归一化 mass 到 [0, 1] 区间用于显示 alpha
-        # 注意：如果 m_pred 差异极大，建议先取 log
-        # alpha = (m - min) / (max - min)
-        # 为了视觉效果，可以设置最小 alpha 阈值，比如 0.05，否则完全看不见
-        m_norm = (m_pred - m_pred.min()) / (m_pred.max() - m_pred.min() + 1e-9)
-        alphas = m_norm # 保证最低有 0.1 的透明度
-        alphas = np.clip(alphas, 0, 1)
-        
-        # Matplotlib scatter 支持 rgba 颜色，我们可以构建一个颜色数组
-        # 基础颜色: tab:blue -> (0.12, 0.46, 0.7, 1.0)
-        base_color = np.array(plt.cm.tab10(0)) # Blue
-        rgba_colors = np.zeros((len(X_pred), 4))
-        rgba_colors[:, :3] = base_color[:3]
-        rgba_colors[:, 3] = alphas # 设置 Alpha 通道
-        
-        ax.scatter(umap_pred[:, 0], umap_pred[:, 1], c=rgba_colors, s=15, label='Predict', rasterized=True)
-        
-        ax.set_title(f"Perturbation: {gene}\n(Predict Alpha scaled by Mass)")
-        ax.legend()
-        ax.set_xticks([])
-        ax.set_yticks([])
-        
-        # === 图 2: 仅展示 Predict 的 Mass 分布 ===
-        ax = axes[1]
-        
-        # 为了背景参考，淡淡地画上 Control
-        ax.scatter(umap_ctrl[:, 0], umap_ctrl[:, 1], c='lightgrey', s=5, alpha=0.2, rasterized=True)
-        
-        # 画 Predict，颜色映射 Mass
-        sc_plot = ax.scatter(umap_pred[:, 0], umap_pred[:, 1], c=m_pred, cmap='viridis', s=15, rasterized=True)
-        plt.colorbar(sc_plot, ax=ax, label='Predicted Mass (m_pred)')
-        
-        ax.set_title(f"Predicted Mass Distribution: {gene}")
-        ax.set_xticks([])
-        ax.set_yticks([])
-        
-        plt.tight_layout()
-        plt.show()
-
-
-
 import scanpy as sc
-import pandas as pd
+from scipy.spatial.distance import cosine
+
 import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
-
-def get_ground_truth_degs(
-    adata_control: sc.AnnData,
-    adata_real: sc.AnnData,
-    target_gene: str,
-    top_n: int = 5,
-    condition_key: str = 'target_gene'
-) -> list:
-    """
-    计算 Control 和 Real(Target) 之间的差异表达基因 (DEGs)。
-    返回: [Target_Gene, DEG_1, DEG_2, ..., DEG_N]
-    """
-    # 1. 提取真实的 perturbation 数据
-    subset_real = adata_real[adata_real.obs[condition_key] == target_gene].copy()
-    
-    if subset_real.n_obs < 5:
-        print(f"Not enough real cells for {target_gene}")
-        return [target_gene]
-
-    # 2. 采样 Control 数据 (为了计算快一点，且保持平衡)
-    # 注意：这里需要使用 raw counts 或者 log1p 后的数据，不要用 scale 后的
-    n_samples = min(2000, adata_control.n_obs)
-    idx_ctrl = np.random.choice(adata_control.n_obs, n_samples, replace=False)
-    subset_ctrl = adata_control[idx_ctrl].copy()
-    
-    # 3. 临时合并数据用于差异分析
-    subset_real.obs['temp_group'] = 'Perturb'
-    subset_ctrl.obs['temp_group'] = 'Control'
-    
-    # 确保 var_names 一致
-    common_genes = subset_real.var_names.intersection(subset_ctrl.var_names)
-    adata_merged = subset_ctrl[:, common_genes].concatenate(subset_real[:, common_genes])
-    
-    # 4. 运行 Wilcoxon Rank-Sum test
-    # 注意：如果你的 .X 是 scale 过的，结果可能不准，建议用 .raw 或 log1p 后的层
-    sc.tl.rank_genes_groups(adata_merged, groupby='temp_group', reference='Control', method='wilcoxon')
-    
-    # 5. 提取 Top Genes (按得分为序)
-    deg_df = sc.get.rank_genes_groups_df(adata_merged, group='Perturb')
-    
-    # 过滤掉 Target Gene 本身 (防止它占了 Top 1 的位置，虽然通常我们也想看它)
-    # 我们手动把它加在列表第一个，所以这里取 Top N 个非 Target 的基因
-    top_genes = deg_df[deg_df['names'] != target_gene].head(top_n)['names'].tolist()
-    
-    # 结果列表：Target Gene + Top Downstream Genes
-    final_genes = [target_gene] + top_genes
-    
-    # 过滤掉不在 var_names 里的（以防万一）
-    return [g for g in final_genes if g in adata_control.var_names]
-
-def plot_top_degs_violin(
-    reconstructed_data: dict,   # 你的 batch_reconstruct 结果
-    adata_control: sc.AnnData,
-    adata_real: sc.AnnData,
-    target_gene: str,
-    top_n: int = 5
-):
-    """
-    自动化流程：找 DEG -> 加权重采样 -> 画图
-    """
-    print(f"--- Analyzing {target_gene} ---")
-    
-    # Step 1: 找出这个 perturbation 对应的 Top DEGs
-    # 这一步确立了“Ground Truth”：真实的扰动到底改变了谁？
-    genes_of_interest = get_ground_truth_degs(adata_control, adata_real, target_gene, top_n)
-    
-    print(f"Top DEGs found: {genes_of_interest}")
-
-    # Step 2: 准备画图数据
-    plot_data = []
-    
-    # --- A. Control Data ---
-    # 随机采点
-    idx_ctrl = np.random.choice(adata_control.n_obs, min(1000, adata_control.n_obs), replace=False)
-    X_ctrl = adata_control[idx_ctrl, :].X
-    if not isinstance(X_ctrl, np.ndarray): X_ctrl = X_ctrl.toarray()
-    
-    for gene in genes_of_interest:
-        col_idx = adata_control.var_names.get_loc(gene)
-        vals = X_ctrl[:, col_idx]
-        for v in vals:
-            plot_data.append({'Condition': 'Control', 'Gene': gene, 'Expression': v})
-
-    # --- B. Real Data ---
-    subset_real = adata_real[adata_real.obs['target_gene'] == target_gene]
-    if subset_real.n_obs > 0:
-        X_real = subset_real.X
-        if not isinstance(X_real, np.ndarray): X_real = X_real.toarray()
-        for gene in genes_of_interest:
-            col_idx = subset_real.var_names.get_loc(gene)
-            vals = X_real[:, col_idx]
-            for v in vals:
-                plot_data.append({'Condition': 'Real', 'Gene': gene, 'Expression': v})
-    
-    # --- C. Predict Data (Weighted) ---
-    if target_gene in reconstructed_data:
-        pred_ad = reconstructed_data[target_gene]
-        mass = pred_ad.obs['mass'].values.flatten()
-        
-        # 处理全0 mass 的边缘情况
-        if mass.sum() == 0: 
-            probs = np.ones_like(mass) / len(mass)
-        else:
-            probs = mass / mass.sum()
-            
-        # 核心：根据 mass 重采样 2000 个细胞
-        resample_idx = np.random.choice(len(mass), size=2000, p=probs, replace=True)
-        X_pred = pred_ad.X[resample_idx]
-        
-        for gene in genes_of_interest:
-            # 注意：reconstructed_data 的 var_names 和 ref_adata 一致
-            if gene in pred_ad.var_names:
-                col_idx = pred_ad.var_names.get_loc(gene)
-                vals = X_pred[:, col_idx]
-                for v in vals:
-                    plot_data.append({'Condition': 'Predict', 'Gene': gene, 'Expression': v})
-
-    # Step 3: 绘图
-    df_plot = pd.DataFrame(plot_data)
-    
-    plt.figure(figsize=(2 + 1.5 * len(genes_of_interest), 5))
-    sns.violinplot(
-        data=df_plot,
-        x='Gene', y='Expression', hue='Condition',
-        palette={'Control': 'lightgrey', 'Real': '#d62728', 'Predict': '#1f77b4'},
-        scale='width', # 让宽度反映密度
-        cut=0,         # 不显示数据范围外的推测
-        linewidth=1
-    )
-    plt.title(f"Top DEGs for perturbation: {target_gene}\n(Predict weighted by mass)")
-    plt.grid(axis='y', linestyle='--', alpha=0.3)
-    plt.tight_layout()
-    plt.show()
-
-
-
+from sklearn.metrics import r2_score
+from scipy.stats import rankdata
+import scipy.sparse as sp
+from scipy.spatial.distance import cdist
 
 import numpy as np
 import scipy.sparse as sp
-from scipy.stats import pearsonr, wasserstein_distance  # 用于计算 PCC 和 分布距离
-from sklearn.metrics import mean_squared_error  
 
-# --- 补充缺失的辅助函数 ---
+def adata_to_numpy(data, copy=True, dtype="float32"):
+    """
+    稳健地转换为 numpy.ndarray。
+    兼容输入为: AnnData, scipy.sparse, 或 numpy.ndarray
+    """
+    # 1. 如果是 AnnData，取其 .X
+    if hasattr(data, "X"):
+        X = data.X
+    else:
+        # 如果不是 AnnData，假设它已经是矩阵（sparse 或 numpy）
+        X = data
 
-def to_dense(X):
-    """
-    通用转换工具：将稀疏矩阵或matrix对象转换为 numpy array
-    """
+    # 2. 如果是稀疏矩阵，转为 dense
     if sp.issparse(X):
-        return X.toarray()
-    if hasattr(X, "A"): # 处理 numpy matrix
-        return X.A
-    return np.array(X)
+        X = X.toarray()
+
+    # 3. 处理 numpy matrix 类型 (old style)
+    if hasattr(X, "A"):
+        X = X.A
+
+    # 4. 确保是 ndarray
+    X = np.asarray(X, dtype=dtype)
+
+    if copy:
+        return X.copy()
+    return X
 
 
-def get_weighted_mean(adata_pred):
-    """
-    计算预测数据的加权均值
-    """
-    X = to_dense(adata_pred.X)
-    
-    # 假设权重存储在 'mass' 列中
-    if 'mass' in adata_pred.obs:
-        mass = adata_pred.obs['mass'].values.flatten()
+
+def calculate_r2_scores(preds, trues):
+    """Calculate global R² and median per-protein R²."""
+
+    trues = adata_to_numpy(trues)
+    preds = adata_to_numpy(preds)
+
+    # 全局R²：保留都不是NaN的点
+
+    valid_idx = (~np.isnan(trues.flatten())) & (~np.isnan(preds.flatten()))
+    if np.sum(valid_idx) > 1:
+        global_r2 = r2_score(trues.flatten()[valid_idx], preds.flatten()[valid_idx])
     else:
-        # 如果没有 mass，默认均匀权重
-        mass = np.ones(X.shape[0])
-    
-    # 归一化权重
-    if mass.sum() == 0:
-        weights = np.ones_like(mass) / len(mass)
-    else:
-        weights = mass / mass.sum()
-        
-    # 加权平均
-    weighted_mean = np.average(X, axis=0, weights=weights)
-    return weighted_mean, weights
+        global_r2 = np.nan
+    print(trues.flatten()[valid_idx].shape)
+    per_protein_r2_scores = []
+    for i in range(preds.shape[1]):
+        yt = trues[:, i]
+        yp = preds[:, i]
+        valid_idx = (~np.isnan(yt)) & (~np.isnan(yp))
+        if np.sum(valid_idx) > 1 and np.var(yt[valid_idx]) > 0:
+            per_protein_r2_scores.append(
+                r2_score(yt[valid_idx], yp[valid_idx])
+            )
+    median_per_protein_r2 = np.mean(per_protein_r2_scores) if per_protein_r2_scores else np.nan
+    return global_r2, median_per_protein_r2, np.array(per_protein_r2_scores)
 
-def get_top_k_pred_diff(delta_vector, gene_names, top_k=20):
+
+def calculate_mse(y_true, y_pred):
     """
-    根据变化量幅度 (|Delta|)，找出变化最大的 Top K 基因名称
+    计算 MSE（Mean Squared Error）
+
     """
-    # 1. 取绝对值
-    abs_delta = np.abs(delta_vector)
+    y_true = adata_to_numpy(y_true)
+    y_pred = adata_to_numpy(y_pred)
     
-    # 2. 排序 (argsort 返回的是从小到大的索引)
-    # 取最后 top_k 个，并倒序 ([::-1]) 变成从大到小
-    if top_k > len(abs_delta):
-        top_k = len(abs_delta)
-        
-    top_indices = np.argsort(abs_delta)[-top_k:][::-1]
+    if hasattr(y_true, "A"): 
+        y_true = y_true.A
+    if hasattr(y_pred, "A"):
+        y_pred = y_pred.A
     
-    return gene_names[top_indices].tolist()
+    y_true = y_true.astype(float)
+    y_pred = y_pred.astype(float)
+
+    mask = ~np.isnan(y_true) & ~np.isnan(y_pred)
+    
+    diff = y_true[mask] - y_pred[mask]
+    mse = np.mean(diff ** 2)
+
+    return mse
+
+def calculate_mae(y_true, y_pred):
+    """
+    计算 MAE
+    """
+    y_true = adata_to_numpy(y_true)
+    y_pred = adata_to_numpy(y_pred)
+    if hasattr(y_true, "A"): 
+        y_true = y_true.A
+    if hasattr(y_pred, "A"):
+        y_pred = y_pred.A
+    
+    y_true = y_true.astype(float)
+    y_pred = y_pred.astype(float)
+
+    mask = ~np.isnan(y_true) & ~np.isnan(y_pred)
+
+    diff = y_true[mask] - y_pred[mask]
+    mae = np.mean(np.abs(diff))
+
+    return mae
+
+
+def compute_delta_mean(adata_ctrl, adata_pert):
+    """
+    根据 AnnData 计算扰动效应向量 delta_x (G 维)
+
+    输入：
+        adata_ctrl  : 对照组 AnnData
+        adata_pert  : 扰动组 AnnData
+
+    输出：
+        delta_x : shape (G,) 的 numpy vector
+    """
+    Xc = adata_ctrl.X.A if hasattr(adata_ctrl.X, "A") else adata_ctrl.X
+    Xp = adata_pert.X.A  if hasattr(adata_pert.X,  "A") else adata_pert.X
+
+    mean_ctrl = np.nanmean(Xc, axis=0)
+    mean_pert = np.nanmean(Xp, axis=0)
+
+    return mean_pert - mean_ctrl
+
+
+def compute_pcc(delta_true, delta_pred):
+    """
+    计算皮尔逊相关系数（PCC），完全按用户提供的公式实现。
+
+    参数：
+        delta_true : shape (G,) 或 (G,1)
+        delta_pred : shape (G,) 或 (G,1)
+    """
+
+
+    if hasattr(delta_true, "A"):
+        delta_true = delta_true.A.ravel()
+    if hasattr(delta_pred, "A"):
+        delta_pred = delta_pred.A.ravel()
+
+    delta_true = np.asarray(delta_true, dtype=float).ravel()
+    delta_pred = np.asarray(delta_pred, dtype=float).ravel()
+
+    mask = ~np.isnan(delta_true) & ~np.isnan(delta_pred)
+    dt = delta_true[mask]
+    dp = delta_pred[mask]
+
+    if dt.size < 2:
+        return np.nan
+
+    mu_true = dt.mean()
+    mu_pred = dp.mean()
+
+    numerator = np.sum((dt - mu_true) * (dp - mu_pred))
+    denominator = np.sqrt(np.sum((dt - mu_true) ** 2)) * np.sqrt(np.sum((dp - mu_pred) ** 2))
+
+    if denominator == 0:
+        return np.nan
+
+    return numerator / denominator
+
+
+def calculate_pcc(adata_true, adata_pred,key="condition",key_control="ctrl",key_pert=None):
+    """
+    计算 pcc（单个扰动 p）
+    """
+    if key is None or key_control is None:
+        raise ValueError("key and key_control should not be None")
+    
+    true_ctrl = adata_true[adata_true.obs[key]==key_control]
+    pred_ctrl = adata_pred[adata_pred.obs[key]==key_control]
+    if key_pert is not None:
+
+        true_pert = adata_true[adata_true.obs[key]==key_pert]
+        pred_pert = adata_pred[adata_pred.obs[key]==key_pert]
+
+    else :
+        true_pert = adata_true[adata_true.obs[key]!=key_control]
+        pred_pert = adata_pred[adata_pred.obs[key]!=key_control]
+    delta_true = compute_delta_mean(true_ctrl, true_pert)
+    delta_pred = compute_delta_mean(pred_ctrl, pred_pert)
+
+    pcc = compute_pcc(delta_true, delta_pred)
+
+    return pcc
 
 
 
-def evaluate_all_perturbations(
-    reconstructed_data: dict,    # 你的预测结果字典 {gene: AnnData}
-    adata_control: sc.AnnData,   # 对照组
-    adata_real: sc.AnnData,      # 真实扰动组
-    condition_key: str = 'target_gene',
-    top_n_deg: int = 20,         # 评估 Top N 基因的重叠率
-    compute_wasserstein: bool = True # 是否计算分布距离（较慢）
+
+def compute_spearman(delta_true, delta_pred):
+    """
+    计算 Spearman 秩相关（完全按公式：先转秩，再算 Pearson）
+    
+    输入：
+        delta_true : (G,)
+        delta_pred : (G,)
+    输出：
+        spearman_r : float
+    """
+
+    if hasattr(delta_true, "A"):
+        delta_true = delta_true.A.ravel()
+    if hasattr(delta_pred, "A"):
+        delta_pred = delta_pred.A.ravel()
+
+    delta_true = np.asarray(delta_true, dtype=float).ravel()
+    delta_pred = np.asarray(delta_pred, dtype=float).ravel()
+
+    mask = ~np.isnan(delta_true) & ~np.isnan(delta_pred)
+    dt = delta_true[mask]
+    dp = delta_pred[mask]
+
+    if dt.size < 2:
+        return np.nan
+    
+    rt = rankdata(dt)
+    rp = rankdata(dp)
+
+    mu_t = rt.mean()
+    mu_p = rp.mean()
+
+    numerator = np.sum((rt - mu_t) * (rp - mu_p))
+    denominator = (
+        np.sqrt(np.sum((rt - mu_t)**2)) * 
+        np.sqrt(np.sum((rp - mu_p)**2))
+    )
+
+    if denominator == 0:
+        return np.nan
+
+    return numerator / denominator
+
+def calculate_spearman(adata_true, adata_pred, key="condition", key_control="ctrl", key_pert=None):
+    """
+    计算 Spearman 秩相关（单个扰动 p）
+    """
+
+    if key is None or key_control is None:
+        raise ValueError("key and key_control should not be None")
+    
+
+    true_ctrl = adata_true[adata_true.obs[key] == key_control]
+    pred_ctrl = adata_pred[adata_pred.obs[key] == key_control]
+
+    if key_pert is not None:
+
+        true_pert = adata_true[adata_true.obs[key]==key_pert]
+        pred_pert = adata_pred[adata_pred.obs[key]==key_pert]
+
+    else :
+        true_pert = adata_true[adata_true.obs[key]!=key_control]
+        pred_pert = adata_pred[adata_pred.obs[key]!=key_control]
+
+
+    delta_true = compute_delta_mean(true_ctrl, true_pert)
+    delta_pred = compute_delta_mean(pred_ctrl, pred_pert)
+
+    return compute_spearman(delta_true, delta_pred)
+
+
+def compute_pdisc(delta_true_dict, delta_pred_dict):
+    pert_names = list(delta_true_dict.keys())
+    T = len(pert_names)
+    pdisc_dict = {}
+    true_matrix = np.stack([delta_true_dict[p] for p in pert_names])
+    
+    for i, pert in enumerate(pert_names):
+        pred_vec = delta_pred_dict[pert].reshape(1, -1)
+        distances = cdist(pred_vec, true_matrix, metric='euclidean').flatten()
+        r_t = np.sum(distances[np.arange(T) != i] < distances[i])
+        pdisc_dict[pert] = r_t / T
+    pdisc_mean = np.mean(list(pdisc_dict.values()))
+    return pdisc_dict, pdisc_mean
+
+
+def cauculate_pdiscn(
+    adata_true, adata_pred, 
+    key="condition", key_control="ctrl", key_pert_list=None
 ):
     """
-    对所有扰动进行批量评估
+    输入:
+        adata_true : 实际 AnnData
+        adata_pred : 预测 AnnData
+        key : 存储条件的列名
+        key_control : 对照组名称
+        key_pert_list : 扰动列表 (如果 None 就用 adata_true 中唯一值)
+    输出:
+        PDISC
     """
-    
-    # 1. 计算 Control 的基准均值
-    # 建议使用 raw 或 normalized data，而不是 scale 过的
-    ctrl_mean = np.mean(to_dense(adata_control.X), axis=0)
-    var_names = np.array(adata_control.var_names)
-    
-    results_list = []
-    
-    # 获取共同的扰动目标
-    pred_targets = list(reconstructed_data.keys())
-    real_targets = adata_real.obs[condition_key].unique()
-    valid_targets = [t for t in pred_targets if t in real_targets]
-    
-    print(f"Starting evaluation on {len(valid_targets)} perturbations...")
-    
-    for i, target in enumerate(valid_targets):
-        if i % 10 == 0: print(f"Processing {i}/{len(valid_targets)}: {target}")
-            
-        # --- A. 准备真实数据 (Ground Truth) ---
-        subset_real = adata_real[adata_real.obs[condition_key] == target]
-        if subset_real.n_obs < 5: continue
-        
-        real_X = to_dense(subset_real.X)
-        real_mean = np.mean(real_X, axis=0)
-        
-        # 真实变化量 (Delta)
-        delta_real = real_mean - ctrl_mean
-        
-        # 获取真实的 DEGs (利用你提供的 rank_genes_groups 逻辑的简化版，或者直接用 mean shift)
-        # 为了速度，这里用 |Mean Shift| 排序作为 Gold Standard
-        # 如果需要更严格的 p-value，可以调用你原来的 get_ground_truth_degs，但这会很慢
-        top_real_genes = get_top_k_pred_diff(delta_real, var_names, top_k=top_n_deg)
-        
-        
-        # --- B. 准备预测数据 (Prediction) ---
-        pred_ad = reconstructed_data[target]
-        pred_mean, pred_weights = get_weighted_mean(pred_ad)
-        
-        # 预测变化量
-        delta_pred = pred_mean - ctrl_mean
-        
-        # 获取预测认为变化最大的基因
-        top_pred_genes = get_top_k_pred_diff(delta_pred, var_names, top_k=top_n_deg)
-        
-        
-        # --- C. 计算指标 ---
-        
-        # 1. Global Metrics (全基因组表达量)
-        # 关注 Delta 的相关性 (方向对不对)
-        pcc_delta, _ = pearsonr(delta_real, delta_pred)
-        # 关注 Delta 的误差 (幅度对不对)
-        mse_delta = mean_squared_error(delta_real, delta_pred)
-        
-        # 2. DEG Overlap (Top N 基因重合度)
-        # Jaccard Index
-        set_real = set(top_real_genes)
-        set_pred = set(top_pred_genes)
-        overlap_count = len(set_real.intersection(set_pred))
-        jaccard = overlap_count / len(set_real.union(set_pred))
-        recall = overlap_count / len(set_real) # 找回了多少真实DEG
-        
-        metrics = {
-            'Target': target,
-            'N_Real_Cells': subset_real.n_obs,
-            'MSE_Delta': mse_delta,
-            'PCC_Delta': pcc_delta,
-            'DEG_Recall': recall,
-            'DEG_Jaccard': jaccard
-        }
-        
-        # 3. Distribution Metrics (仅在 Target Gene 和 Top DEG 上计算)
-        # 计算 Wassertein 距离看分布拟合得好不好
-        if compute_wasserstein:
-            # 为了计算分布距离，我们需要对预测数据进行重采样 (Resample)
-            # 因为 Wasserstein 需要两个样本集
-            resample_idx = np.random.choice(len(pred_weights), size=min(500, subset_real.n_obs), p=pred_weights)
-            X_pred_resampled = to_dense(pred_ad.X)[resample_idx]
-            X_real_sub = real_X[:len(resample_idx)] # 保持数量一致
-            
-            # 3.1 Target Gene 本身的分布距离
-            if target in var_names:
-                idx_t = np.where(var_names == target)[0][0]
-                wd_target = wasserstein_distance(X_real_sub[:, idx_t], X_pred_resampled[:, idx_t])
-                metrics['WD_Target'] = wd_target
-            
-            # 3.2 Top 5 Real DEGs 的平均分布距离
-            wd_degs = []
-            for deg in top_real_genes[:5]: # 只看前5个最显著的
-                if deg in var_names:
-                    idx_d = np.where(var_names == deg)[0][0]
-                    wd = wasserstein_distance(X_real_sub[:, idx_d], X_pred_resampled[:, idx_d])
-                    wd_degs.append(wd)
-            metrics['WD_Top5_DEGs'] = np.mean(wd_degs) if wd_degs else np.nan
+    if key_pert_list is None:
+        key_pert_list = adata_true.obs[key].unique().tolist()
+        key_pert_list = [k for k in key_pert_list if k != key_control]
 
-        results_list.append(metrics)
+    delta_true_dict = {}
+    delta_pred_dict = {}
 
-    # --- D. 汇总结果 ---
-    results_df = pd.DataFrame(results_list)
+    for pert in key_pert_list:
+        true_ctrl = adata_true[adata_true.obs[key] == key_control]
+        true_pert = adata_true[adata_true.obs[key] == pert]
+        pred_ctrl = adata_pred[adata_pred.obs[key] == key_control]
+        pred_pert = adata_pred[adata_pred.obs[key] == pert]
+
+        delta_true = compute_delta_mean(true_ctrl, true_pert)
+        delta_pred = compute_delta_mean(pred_ctrl, pred_pert)
+
+        delta_true_dict[pert] = delta_true
+        delta_pred_dict[pert] = delta_pred
+
+
+        
+    pdisc_dict, pdisc_mean = compute_pdisc(delta_true_dict, delta_pred_dict)
+
+
+    return pdisc_dict, pdisc_mean
+
+
+
+
+def get_embedding_matrix(adata, key):
+    """
+    辅助函数：从 AnnData 中获取 embedding。
+    支持 adata.obsm['key'] 或 adata.layers['key'] 或 adata[key]
+    """
+    if key in adata.obsm.keys():
+        return adata.obsm[key]
+    elif key in adata.layers.keys():
+        return adata.layers[key]
+    elif key in adata.obs.keys():
+        # 这种情况比较少见，通常 embedding 是矩阵
+        return adata.obs[key].values
+    else:
+        # 尝试直接通过 adata[key] (用户提到的 adata_control[sample_rep_scaled])
+        try:
+            res = adata[key]
+            if hasattr(res, "X"): # 如果返回的是 View
+                return res.X
+            return res
+        except:
+            raise ValueError(f"Could not find embedding key '{key}' in adata.")
+
+def evaluate_all(
+    results_genes, 
+    results_embedding, 
+    adata_train, 
+    adata_control, 
+    pert_key="condition", 
+    control_label="ctrl",
+    embedding_key="sample_rep_scaled"
+):
+    metrics_list = []
     
-    summary = {
-        'Mean_MSE': results_df['MSE_Delta'].mean(),
-        'Mean_PCC': results_df['PCC_Delta'].mean(),
-        'Mean_DEG_Recall': results_df['DEG_Recall'].mean(),
-        'Mean_WD_Target': results_df['WD_Target'].mean() if 'WD_Target' in results_df else None
-    }
+    # 1. 预计算 Control 的均值 (用于 Delta 计算)
+    # 使用之前修复过的 adata_to_numpy
+    ctrl_X = adata_to_numpy(adata_control)
+    ctrl_mean_gene = np.nanmean(ctrl_X, axis=0)
     
-    print("\n=== Evaluation Summary ===")
-    print(f"Evaluated {len(results_df)} perturbations.")
-    print(f"Mean PCC (Delta): {summary['Mean_PCC']:.4f}")
-    print(f"Mean MSE (Delta): {summary['Mean_MSE']:.4f}")
-    print(f"Mean DEG Recall@{top_n_deg}: {summary['Mean_DEG_Recall']:.4f}")
+    # Control 的 Latent 均值
+    true_emb_ctrl = get_embedding_matrix(adata_control, embedding_key)
+    ctrl_mean_latent = np.nanmean(true_emb_ctrl, axis=0)
+
+    pert_names = list(results_genes.keys())
+    print(f"Start evaluating {len(pert_names)} perturbations (Pseudo-bulk mode)...")
+
+    for pert in pert_names:
+        row = {'perturbation': pert}
+        
+        # =======================
+        # A. 准备数据
+        # =======================
+        
+        # 1. 获取 Gene Space 真实值
+        adata_true_pert = adata_train[adata_train.obs[pert_key] == pert]
+        if adata_true_pert.n_obs == 0:
+            continue
+        X_true = adata_to_numpy(adata_true_pert)
+        
+        # 2. 获取 Gene Space 预测值
+        adata_pred_pert = results_genes[pert]
+        X_pred = adata_to_numpy(adata_pred_pert)
+        
+        # =======================
+        # B. Gene Space Metrics (Pseudo-bulk)
+        # =======================
+        # 核心修改：计算均值向量 (Shape: [n_genes])
+        # 因为细胞数不匹配 (150 vs 3656)，必须对比均值
+        mean_true = np.nanmean(X_true, axis=0)
+        mean_pred = np.nanmean(X_pred, axis=0)
+        
+        # 1. Mean Gene MSE/MAE
+        # 对比两个向量的差异
+        row['gene_mse'] = np.mean((mean_true - mean_pred) ** 2)
+        row['gene_mae'] = np.mean(np.abs(mean_true - mean_pred))
+        
+        # 2. Global R2 (Means correlation across genes)
+        # 衡量预测的平均表达谱和真实的平均表达谱的相关性
+        # 注意：这里不能算 per-gene R2，因为只有一个样本(均值)
+        row['gene_r2_global'] = r2_score(mean_true, mean_pred)
+        
+        # 3. Delta Metrics (PCC, Spearman)
+        # 均值改变量的相关性
+        delta_pred = mean_pred - ctrl_mean_gene
+        delta_true = mean_true - ctrl_mean_gene
+        
+        row['gene_pcc_delta'] = compute_pcc(delta_true, delta_pred)
+        row['gene_spearman_delta'] = compute_spearman(delta_true, delta_pred)
+
+        # =======================
+        # C. Latent Space Metrics
+        # =======================
+        
+        Z_true = get_embedding_matrix(adata_true_pert, embedding_key)
+        Z_pred = results_embedding[pert]['z_pred']
+        
+        # 同样使用均值对比
+        z_mean_true = np.mean(Z_true, axis=0)
+        z_mean_pred = np.mean(Z_pred, axis=0)
+        
+        # Latent MSE (Means)
+        row['latent_mse'] = np.mean((z_mean_true - z_mean_pred)**2)
+        
+        # Latent Cosine Similarity (Means)
+        # 1 - cosine distance = cosine similarity
+        row['latent_cosine'] = 1 - cosine(z_mean_true, z_mean_pred)
+        
+        # Latent Delta Cosine (Direction consistency)
+        delta_z_true = z_mean_true - ctrl_mean_latent
+        delta_z_pred = z_mean_pred - ctrl_mean_latent
+        row['latent_delta_cosine'] = 1 - cosine(delta_z_true, delta_z_pred)
+
+        metrics_list.append(row)
+
+    return pd.DataFrame(metrics_list)
+
+# --- 扩展：计算 PDISC (Separability) ---
+# PDISC 需要所有扰动的 Delta 集合，因此不能在上面的单次循环中通过
+def evaluate_pdisc(results_genes, adata_train, adata_control, pert_key="condition"):
+    """
+    专门计算 PDISC 的包装器
+    """
+    pert_names = list(results_genes.keys())
+    ctrl_mean = np.nanmean(adata_to_numpy(adata_control), axis=0)
     
-    return results_df, summary
+    delta_true_dict = {}
+    delta_pred_dict = {}
+    
+    for pert in pert_names:
+        # 获取真实数据
+        adata_true = adata_train[adata_train.obs[pert_key] == pert]
+        if adata_true.n_obs == 0: continue
+        
+        mean_true = np.nanmean(adata_to_numpy(adata_true), axis=0)
+        mean_pred = np.nanmean(adata_to_numpy(results_genes[pert]), axis=0)
+        
+        delta_true_dict[pert] = mean_true - ctrl_mean
+        delta_pred_dict[pert] = mean_pred - ctrl_mean
+        
+    pdisc_dict, pdisc_mean = compute_pdisc(delta_true_dict, delta_pred_dict)
+    return pdisc_dict, pdisc_mean
