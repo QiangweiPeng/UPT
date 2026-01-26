@@ -260,3 +260,190 @@ def plot_top_degs_violin(
     plt.grid(axis='y', linestyle='--', alpha=0.3)
     plt.tight_layout()
     plt.show()
+
+
+
+
+import numpy as np
+import scipy.sparse as sp
+from scipy.stats import pearsonr, wasserstein_distance  # 用于计算 PCC 和 分布距离
+from sklearn.metrics import mean_squared_error  
+
+# --- 补充缺失的辅助函数 ---
+
+def to_dense(X):
+    """
+    通用转换工具：将稀疏矩阵或matrix对象转换为 numpy array
+    """
+    if sp.issparse(X):
+        return X.toarray()
+    if hasattr(X, "A"): # 处理 numpy matrix
+        return X.A
+    return np.array(X)
+
+
+def get_weighted_mean(adata_pred):
+    """
+    计算预测数据的加权均值
+    """
+    X = to_dense(adata_pred.X)
+    
+    # 假设权重存储在 'mass' 列中
+    if 'mass' in adata_pred.obs:
+        mass = adata_pred.obs['mass'].values.flatten()
+    else:
+        # 如果没有 mass，默认均匀权重
+        mass = np.ones(X.shape[0])
+    
+    # 归一化权重
+    if mass.sum() == 0:
+        weights = np.ones_like(mass) / len(mass)
+    else:
+        weights = mass / mass.sum()
+        
+    # 加权平均
+    weighted_mean = np.average(X, axis=0, weights=weights)
+    return weighted_mean, weights
+
+def get_top_k_pred_diff(delta_vector, gene_names, top_k=20):
+    """
+    根据变化量幅度 (|Delta|)，找出变化最大的 Top K 基因名称
+    """
+    # 1. 取绝对值
+    abs_delta = np.abs(delta_vector)
+    
+    # 2. 排序 (argsort 返回的是从小到大的索引)
+    # 取最后 top_k 个，并倒序 ([::-1]) 变成从大到小
+    if top_k > len(abs_delta):
+        top_k = len(abs_delta)
+        
+    top_indices = np.argsort(abs_delta)[-top_k:][::-1]
+    
+    return gene_names[top_indices].tolist()
+
+
+
+def evaluate_all_perturbations(
+    reconstructed_data: dict,    # 你的预测结果字典 {gene: AnnData}
+    adata_control: sc.AnnData,   # 对照组
+    adata_real: sc.AnnData,      # 真实扰动组
+    condition_key: str = 'target_gene',
+    top_n_deg: int = 20,         # 评估 Top N 基因的重叠率
+    compute_wasserstein: bool = True # 是否计算分布距离（较慢）
+):
+    """
+    对所有扰动进行批量评估
+    """
+    
+    # 1. 计算 Control 的基准均值
+    # 建议使用 raw 或 normalized data，而不是 scale 过的
+    ctrl_mean = np.mean(to_dense(adata_control.X), axis=0)
+    var_names = np.array(adata_control.var_names)
+    
+    results_list = []
+    
+    # 获取共同的扰动目标
+    pred_targets = list(reconstructed_data.keys())
+    real_targets = adata_real.obs[condition_key].unique()
+    valid_targets = [t for t in pred_targets if t in real_targets]
+    
+    print(f"Starting evaluation on {len(valid_targets)} perturbations...")
+    
+    for i, target in enumerate(valid_targets):
+        if i % 10 == 0: print(f"Processing {i}/{len(valid_targets)}: {target}")
+            
+        # --- A. 准备真实数据 (Ground Truth) ---
+        subset_real = adata_real[adata_real.obs[condition_key] == target]
+        if subset_real.n_obs < 5: continue
+        
+        real_X = to_dense(subset_real.X)
+        real_mean = np.mean(real_X, axis=0)
+        
+        # 真实变化量 (Delta)
+        delta_real = real_mean - ctrl_mean
+        
+        # 获取真实的 DEGs (利用你提供的 rank_genes_groups 逻辑的简化版，或者直接用 mean shift)
+        # 为了速度，这里用 |Mean Shift| 排序作为 Gold Standard
+        # 如果需要更严格的 p-value，可以调用你原来的 get_ground_truth_degs，但这会很慢
+        top_real_genes = get_top_k_pred_diff(delta_real, var_names, top_k=top_n_deg)
+        
+        
+        # --- B. 准备预测数据 (Prediction) ---
+        pred_ad = reconstructed_data[target]
+        pred_mean, pred_weights = get_weighted_mean(pred_ad)
+        
+        # 预测变化量
+        delta_pred = pred_mean - ctrl_mean
+        
+        # 获取预测认为变化最大的基因
+        top_pred_genes = get_top_k_pred_diff(delta_pred, var_names, top_k=top_n_deg)
+        
+        
+        # --- C. 计算指标 ---
+        
+        # 1. Global Metrics (全基因组表达量)
+        # 关注 Delta 的相关性 (方向对不对)
+        pcc_delta, _ = pearsonr(delta_real, delta_pred)
+        # 关注 Delta 的误差 (幅度对不对)
+        mse_delta = mean_squared_error(delta_real, delta_pred)
+        
+        # 2. DEG Overlap (Top N 基因重合度)
+        # Jaccard Index
+        set_real = set(top_real_genes)
+        set_pred = set(top_pred_genes)
+        overlap_count = len(set_real.intersection(set_pred))
+        jaccard = overlap_count / len(set_real.union(set_pred))
+        recall = overlap_count / len(set_real) # 找回了多少真实DEG
+        
+        metrics = {
+            'Target': target,
+            'N_Real_Cells': subset_real.n_obs,
+            'MSE_Delta': mse_delta,
+            'PCC_Delta': pcc_delta,
+            'DEG_Recall': recall,
+            'DEG_Jaccard': jaccard
+        }
+        
+        # 3. Distribution Metrics (仅在 Target Gene 和 Top DEG 上计算)
+        # 计算 Wassertein 距离看分布拟合得好不好
+        if compute_wasserstein:
+            # 为了计算分布距离，我们需要对预测数据进行重采样 (Resample)
+            # 因为 Wasserstein 需要两个样本集
+            resample_idx = np.random.choice(len(pred_weights), size=min(500, subset_real.n_obs), p=pred_weights)
+            X_pred_resampled = to_dense(pred_ad.X)[resample_idx]
+            X_real_sub = real_X[:len(resample_idx)] # 保持数量一致
+            
+            # 3.1 Target Gene 本身的分布距离
+            if target in var_names:
+                idx_t = np.where(var_names == target)[0][0]
+                wd_target = wasserstein_distance(X_real_sub[:, idx_t], X_pred_resampled[:, idx_t])
+                metrics['WD_Target'] = wd_target
+            
+            # 3.2 Top 5 Real DEGs 的平均分布距离
+            wd_degs = []
+            for deg in top_real_genes[:5]: # 只看前5个最显著的
+                if deg in var_names:
+                    idx_d = np.where(var_names == deg)[0][0]
+                    wd = wasserstein_distance(X_real_sub[:, idx_d], X_pred_resampled[:, idx_d])
+                    wd_degs.append(wd)
+            metrics['WD_Top5_DEGs'] = np.mean(wd_degs) if wd_degs else np.nan
+
+        results_list.append(metrics)
+
+    # --- D. 汇总结果 ---
+    results_df = pd.DataFrame(results_list)
+    
+    summary = {
+        'Mean_MSE': results_df['MSE_Delta'].mean(),
+        'Mean_PCC': results_df['PCC_Delta'].mean(),
+        'Mean_DEG_Recall': results_df['DEG_Recall'].mean(),
+        'Mean_WD_Target': results_df['WD_Target'].mean() if 'WD_Target' in results_df else None
+    }
+    
+    print("\n=== Evaluation Summary ===")
+    print(f"Evaluated {len(results_df)} perturbations.")
+    print(f"Mean PCC (Delta): {summary['Mean_PCC']:.4f}")
+    print(f"Mean MSE (Delta): {summary['Mean_MSE']:.4f}")
+    print(f"Mean DEG Recall@{top_n_deg}: {summary['Mean_DEG_Recall']:.4f}")
+    
+    return results_df, summary
