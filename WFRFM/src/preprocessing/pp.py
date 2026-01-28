@@ -15,6 +15,7 @@ def process_to_embedding(adata_control, adata_train,
                          adata_test = None,
                          sample_rep = "X_pca", # X_ae; X_state
                          n_comps = 100,
+                         n_hidden = 1024,
                          model_ref = None,
                          model_train = None,
                          model_test = None,
@@ -72,12 +73,19 @@ def process_to_embedding(adata_control, adata_train,
                 layer="counts", 
                 batch_key="batch",  # 自动去批次
             )
-            model_ref = scvi.model.SCVI(adata_control, n_latent=n_comps, gene_likelihood="nb")
+            model_ref = scvi.model.SCVI(
+                adata_control, 
+                n_latent=n_comps, 
+                n_hidden = n_hidden,
+                n_layers = 2,
+                gene_likelihood="nb",
+            )
             model_ref.train(
                 max_epochs=500,        
                 early_stopping=True,  
                 early_stopping_patience=20, 
-                check_val_every_n_epoch=1
+                check_val_every_n_epoch=1,
+                plan_kwargs={"lr": 1e-4}
             )
             model_ref.save(f"{scvi_save_path}_ref", overwrite=True)
         adata_control.obsm[sample_rep] = model_ref.get_latent_representation()
@@ -89,7 +97,7 @@ def process_to_embedding(adata_control, adata_train,
                 adata_train, 
                 model_ref
             )
-            model_train.train(max_epochs=100, plan_kwargs=dict(weight_decay=0.0))
+            model_train.train(max_epochs=10, plan_kwargs=dict(weight_decay=0.0))
             model_train.save(f"{scvi_save_path}_train", overwrite=True)
         adata_train.obsm[sample_rep] = model_train.get_latent_representation()
 
@@ -99,7 +107,7 @@ def process_to_embedding(adata_control, adata_train,
                     adata_test, 
                     model_ref
                 )
-                model_test.train(max_epochs=100, plan_kwargs=dict(weight_decay=0.0))
+                model_test.train(max_epochs=10, plan_kwargs=dict(weight_decay=0.0))
                 model_test.save(f"{scvi_save_path}_test", overwrite=True)
             adata_test.obsm[sample_rep] = model_test.get_latent_representation()
             
@@ -112,7 +120,7 @@ def process_to_embedding(adata_control, adata_train,
         if flatvi_kwargs is None:
             flatvi_kwargs = {
                 'n_latent': n_comps,
-                'hidden_dims': [512, 256, n_comps],
+                'hidden_dims': [n_hidden, n_hidden, n_comps],
                 'fl_weight': 1.0,
                 'learning_rate': 1e-3,
                 'device': 'cuda'
@@ -142,7 +150,58 @@ def process_to_embedding(adata_control, adata_train,
         if adata_test is not None:
             print("Test Std:", np.std(adata_test.obsm[sample_rep], axis=0)[:5])
         model_ref = flatvi_model
-        
+
+    elif sample_rep == "X_scVI_linear":
+
+        scvi.settings.dl_num_workers = 12
+        if model_ref is None:
+            # 依然是在control上训练
+            print("training linearscvi model_ref")
+            scvi.model.LinearSCVI.setup_anndata(
+                adata_control, 
+                layer="counts", 
+                batch_key="batch",  # 自动去批次
+            )
+            model_ref = scvi.model.LinearSCVI(
+                adata_control, 
+                n_latent=n_comps, 
+                gene_likelihood="nb",
+            )
+            model_ref.train(
+                max_epochs=500,        
+                early_stopping=True,  
+                early_stopping_patience=20, 
+                check_val_every_n_epoch=1,
+                plan_kwargs={"lr": 5e-4}
+            )
+            model_ref.save(f"{scvi_save_path}_ref", overwrite=True)
+        adata_control.obsm[sample_rep] = model_ref.get_latent_representation()
+
+        print("projecting")
+        # train和test project到上面的空间
+        if model_train is None:
+            model_train = scvi.model.LinearSCVI.load_query_data(
+                adata_train, 
+                model_ref
+            )
+            model_train.train(max_epochs=10, plan_kwargs=dict(weight_decay=0.0))
+            model_train.save(f"{scvi_save_path}_train", overwrite=True)
+        adata_train.obsm[sample_rep] = model_train.get_latent_representation()
+
+        if adata_test is not None:
+            if model_test is None:
+                model_test = scvi.model.LinearSCVI.load_query_data(
+                    adata_test, 
+                    model_ref
+                )
+                model_test.train(max_epochs=10, plan_kwargs=dict(weight_decay=0.0))
+                model_test.save(f"{scvi_save_path}_test", overwrite=True)
+            adata_test.obsm[sample_rep] = model_test.get_latent_representation()
+            
+        print("Control Std:", np.std(adata_control.obsm[sample_rep], axis=0))
+        print("Train Std:", np.std(adata_train.obsm[sample_rep], axis=0))
+        if adata_test is not None:
+            print("Test Std:", np.std(adata_test.obsm[sample_rep], axis=0))
         
     elif sample_rep == "??":
         raise ValueError("TODO")

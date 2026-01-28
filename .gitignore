@@ -10,3 +10,4 @@ WFRFM/results/figures/*
 !WFRFM/results/checkpoints/.gitkeep
 !WFRFM/results/figures/.gitkeep
 WFRFM/lightning_logs/*
+WFRFM/trash/*
