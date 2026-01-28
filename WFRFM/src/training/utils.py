@@ -7,6 +7,7 @@ import torch
 import ot
 from scipy import sparse
 from tqdm import tqdm
+import random
 
     
 
@@ -211,3 +212,13 @@ def pre_compute_wfr_ot(adata_control,
     
     print(f"完成！最终结果: {save_path}")
     return final_results
+
+def seed_everything(seed=42):
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed) 
+    
+    print(f"Global seed set to {seed}")
