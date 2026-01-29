@@ -98,9 +98,9 @@ def evaluate_latent(
         # latent space
         Z_true = get_embedding(adata_true_pert, embedding_key)
         Z_pred = results_embedding[pert]['z_pred']
-        Z_m_pred = results_embedding[pert]['m_pred']
-        Z_m_pred = np.asarray(m_pred)
-        Z_m_pred = m_pred / m_pred.sum()
+        Z_m_pred = results_embedding[pert]['m_pred'].flatten()
+        Z_m_pred = np.asarray(Z_m_pred)
+        Z_m_pred = Z_m_pred / Z_m_pred.sum()
         
         z_mean_true = np.mean(Z_true, axis=0)
         z_mean_pred = np.average(Z_pred, axis=0, weights = Z_m_pred)
@@ -173,7 +173,7 @@ def evaluate_population_average(
             )
             X_pred_rs = X_pred[idx]
             e_vals.append(
-                compute_edistance(X_true, X_pred_rs,max_n=Edistance_sample_num, seed=random_seed)
+                compute_edistance(X_true, X_pred_rs,max_n=Edistance_sample_num, seed=seed)
             )
         
         row['e_distance'] = np.mean(e_vals)
@@ -250,16 +250,14 @@ def _rank_degs_top_names(adata_pert, adata_ctrl, top_n=200, seed=42):
     用 Scanpy rank_genes_groups 的默认参数（除 groupby/groups/reference 必须指定）。
     返回 top_n 基因名列表。
     """
-    # 合并成一个 adata
+    # 合并成一个 adata：mapping key 已经包含了类别信息，所以不要再传 keys=
     adata_mix = ad.concat(
         {"pert": adata_pert, "ctrl": adata_ctrl},
         label="group",
-        keys=["pert", "ctrl"],
         join="inner",
         merge="same"
     )
 
-    # 默认参数：不指定 method / corr_method 等
     sc.tl.rank_genes_groups(
         adata_mix,
         groupby="group",
@@ -268,9 +266,7 @@ def _rank_degs_top_names(adata_pert, adata_ctrl, top_n=200, seed=42):
     )
 
     df = sc.get.rank_genes_groups_df(adata_mix, group="pert")
-    # df 默认按分数排序，取前 top_n
-    names = df["names"].astype(str).tolist()[:top_n]
-    return names
+    return df["names"].astype(str).tolist()[:top_n]
 
 
 def evaluate_population_distribution(
@@ -293,7 +289,7 @@ def evaluate_population_distribution(
     rng = np.random.default_rng(seed)
     metrics_list = []
 
-    # 选基因子集（加速）
+    # 选基因子集
     gene_idx = _select_gene_indices(adata_control, max_genes=max_genes)
 
     pert_names = list(results_genes.keys())
