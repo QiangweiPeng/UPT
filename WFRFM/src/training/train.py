@@ -23,7 +23,9 @@ def train_model(adata_control, adata_treated, adata_test,
                 condition_rep_keys = "gene_embeddings",
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                 save_path=None,
-                eval_interval = 10):
+                eval_interval = 10,
+                save_interval = 5000,
+                save_only_last = False):
     
     
     train_loader = DataLoaderHelper(
@@ -101,12 +103,13 @@ def train_model(adata_control, adata_treated, adata_test,
             # logging.info(f"Epoch {i}: loss={loss.item():.3f}, vloss={vloss.item():.3f}, gloss={gloss.item():.3f}")
             # progress_bar.set_postfix({"loss": f"{loss.item():.3f}","vloss": f"{vloss.item():.3f}", "gloss": f"{gloss.item():.3f}"})
 
-        if (i+1) % 5000 == 0:
+        if (i+1) % save_interval == 0:
             if save_path is not None:
                 ckpt_path = f"{save_path}_epoch_{i+1}.pt"
                 torch.save({
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(), 
                     'vloss_list': vloss_list,
                     'gloss_list': gloss_list,
                     'loss_list': loss_list,
@@ -116,7 +119,7 @@ def train_model(adata_control, adata_treated, adata_test,
                 }, ckpt_path)
                 logging.info(f"Model and training state saved to {ckpt_path}")
 
-                if last_ckpt_path is not None and os.path.isfile(last_ckpt_path):
+                if last_ckpt_path is not None and os.path.isfile(last_ckpt_path) and save_only_last:
                     try:
                         os.remove(last_ckpt_path)
                     except OSError:
