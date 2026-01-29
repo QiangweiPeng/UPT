@@ -76,7 +76,7 @@ def calculate_mse(y_true, y_pred):
     y_true = adata_to_numpy(y_true)
     y_pred = adata_to_numpy(y_pred)
     
-    if hasattr(y_true, "A"): 
+    if hasattr(y_true, "A"):  # A?
         y_true = y_true.A
     if hasattr(y_pred, "A"):
         y_pred = y_pred.A
