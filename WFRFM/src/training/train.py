@@ -101,7 +101,7 @@ def train_model(adata_control, adata_treated, adata_test,
             # logging.info(f"Epoch {i}: loss={loss.item():.3f}, vloss={vloss.item():.3f}, gloss={gloss.item():.3f}")
             # progress_bar.set_postfix({"loss": f"{loss.item():.3f}","vloss": f"{vloss.item():.3f}", "gloss": f"{gloss.item():.3f}"})
 
-        if (i+1) % 5000 == 0:
+        if (i+1) % 1000 == 0:
             if save_path is not None:
                 ckpt_path = f"{save_path}_epoch_{i+1}.pt"
                 torch.save({
