@@ -16,11 +16,11 @@ def process_to_embedding(adata_control, adata_train,
                          sample_rep = "X_pca", # X_ae; X_state
                          n_comps = 100,
                          n_hidden = 1024,
+                         n_layers = 2,
                          model_ref = None,
                          model_train = None,
                          model_test = None,
-                         scvi_save_path = None,
-                         flatvi_save_path = None,
+                         model_save_path = None,
                          control_key = "is_control",
                          condition_keys = "target_gene",
                          condition_rep_keys = "gene_embeddings",
@@ -77,17 +77,17 @@ def process_to_embedding(adata_control, adata_train,
                 adata_control, 
                 n_latent=n_comps, 
                 n_hidden = n_hidden,
-                n_layers = 2,
+                n_layers = n_layers,
                 gene_likelihood="nb",
             )
             model_ref.train(
                 max_epochs=500,        
                 early_stopping=True,  
-                early_stopping_patience=20, 
-                check_val_every_n_epoch=1,
+                early_stopping_patience=50, 
+                check_val_every_n_epoch=5,
                 plan_kwargs={"lr": 1e-4}
             )
-            model_ref.save(f"{scvi_save_path}_ref", overwrite=True)
+            model_ref.save(f"{model_save_path}_ref", overwrite=True)
         adata_control.obsm[sample_rep] = model_ref.get_latent_representation()
 
         print("projecting")
@@ -98,7 +98,7 @@ def process_to_embedding(adata_control, adata_train,
                 model_ref
             )
             model_train.train(max_epochs=10, plan_kwargs=dict(weight_decay=0.0))
-            model_train.save(f"{scvi_save_path}_train", overwrite=True)
+            model_train.save(f"{model_save_path}_train", overwrite=True)
         adata_train.obsm[sample_rep] = model_train.get_latent_representation()
 
         if adata_test is not None:
@@ -108,7 +108,7 @@ def process_to_embedding(adata_control, adata_train,
                     model_ref
                 )
                 model_test.train(max_epochs=10, plan_kwargs=dict(weight_decay=0.0))
-                model_test.save(f"{scvi_save_path}_test", overwrite=True)
+                model_test.save(f"{model_save_path}_test", overwrite=True)
             adata_test.obsm[sample_rep] = model_test.get_latent_representation()
             
         print("Control Std:", np.std(adata_control.obsm[sample_rep], axis=0))
@@ -120,23 +120,23 @@ def process_to_embedding(adata_control, adata_train,
         if flatvi_kwargs is None:
             flatvi_kwargs = {
                 'n_latent': n_comps,
-                'hidden_dims': [n_hidden, n_hidden, n_comps],
+                'hidden_dims': [n_hidden] * n_layers + [n_comps],
                 'fl_weight': 1.0,
-                'learning_rate': 1e-3,
+                'learning_rate': 1e-4,
                 'device': 'cuda'
             }
         flatvi_model = FlatVIEmbedding(**flatvi_kwargs)
-        model_path = f"{flatvi_save_path}/model.pt"
+        model_path = f"{model_save_path}/model.pt"
         if os.path.exists(model_path):
             flatvi_model.load_model_weights(model_path, in_dim=adata_control.n_vars)
         else:
             flatvi_model.train_model(
                 adata_control,
-                max_epochs=200,
+                max_epochs=150,
                 batch_size=256,
-                save_path=flatvi_save_path
+                save_path=model_save_path 
             )
-            if flatvi_save_path is not None:
+            if model_save_path is not None:
                 flatvi_model.save_model(model_path)
 
         flatvi_model.model.to(device)
@@ -151,58 +151,12 @@ def process_to_embedding(adata_control, adata_train,
             print("Test Std:", np.std(adata_test.obsm[sample_rep], axis=0)[:5])
         model_ref = flatvi_model
 
-    elif sample_rep == "X_scVI_linear":
-
-        scvi.settings.dl_num_workers = 12
-        if model_ref is None:
-            # 依然是在control上训练
-            print("training linearscvi model_ref")
-            scvi.model.LinearSCVI.setup_anndata(
-                adata_control, 
-                layer="counts", 
-                batch_key="batch",  # 自动去批次
-            )
-            model_ref = scvi.model.LinearSCVI(
-                adata_control, 
-                n_latent=n_comps, 
-                gene_likelihood="nb",
-            )
-            model_ref.train(
-                max_epochs=500,        
-                early_stopping=True,  
-                early_stopping_patience=20, 
-                check_val_every_n_epoch=1,
-                plan_kwargs={"lr": 5e-4}
-            )
-            model_ref.save(f"{scvi_save_path}_ref", overwrite=True)
-        adata_control.obsm[sample_rep] = model_ref.get_latent_representation()
-
-        print("projecting")
-        # train和test project到上面的空间
-        if model_train is None:
-            model_train = scvi.model.LinearSCVI.load_query_data(
-                adata_train, 
-                model_ref
-            )
-            model_train.train(max_epochs=10, plan_kwargs=dict(weight_decay=0.0))
-            model_train.save(f"{scvi_save_path}_train", overwrite=True)
-        adata_train.obsm[sample_rep] = model_train.get_latent_representation()
-
-        if adata_test is not None:
-            if model_test is None:
-                model_test = scvi.model.LinearSCVI.load_query_data(
-                    adata_test, 
-                    model_ref
-                )
-                model_test.train(max_epochs=10, plan_kwargs=dict(weight_decay=0.0))
-                model_test.save(f"{scvi_save_path}_test", overwrite=True)
-            adata_test.obsm[sample_rep] = model_test.get_latent_representation()
-            
+    elif sample_rep == "X_state":
         print("Control Std:", np.std(adata_control.obsm[sample_rep], axis=0))
         print("Train Std:", np.std(adata_train.obsm[sample_rep], axis=0))
         if adata_test is not None:
             print("Test Std:", np.std(adata_test.obsm[sample_rep], axis=0))
-        
+    
     elif sample_rep == "??":
         raise ValueError("TODO")
     else:
