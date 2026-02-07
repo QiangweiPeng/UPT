@@ -164,11 +164,41 @@ def process_to_embedding(adata_control, adata_train,
         
 
     if condition_rep_dict is not None: 
-        temp = adata_train.obs[condition_keys].map(condition_rep_dict).values
-        adata_train.obsm[condition_rep_keys] = convert_mixed_array_to_2d(temp) # 放到obsm中
+        unique_keys = set(adata_train.obs[condition_keys].unique())
         if adata_test is not None:
-            temp = adata_test.obs[condition_keys].map(condition_rep_dict).values
+            unique_keys.update(adata_test.obs[condition_keys].unique())
+
+        extended_rep_dict = {}
+        for key in unique_keys:
+            if key in condition_rep_dict:
+                extended_rep_dict[key] = condition_rep_dict[key]
+            elif '+' in key: # 双扰动
+                genes = key.split('+')
+                if len(genes) == 2: #认为只有双敲
+                    g1, g2 = genes[0].strip(), genes[1].strip()
+                    if g1 == 'ctrl' and g2 in condition_rep_dict:
+                        extended_rep_dict[key] = condition_rep_dict[g2]
+                    elif g2 == 'ctrl' and g1 in condition_rep_dict:
+                        extended_rep_dict[key] = condition_rep_dict[g1]
+                    
+                    elif g1 in condition_rep_dict and g2 in condition_rep_dict:
+                        vec1 = np.array(condition_rep_dict[g1])
+                        vec2 = np.array(condition_rep_dict[g2])
+                        extended_rep_dict[key] = vec1 + vec2              
+                    else:
+                        raise KeyError(f"Components of '{key}' not found in condition_rep_dict")
+                else:
+                     pass 
+            else:
+                raise KeyError(f"Key '{key}' not found in condition_rep_dict")
+
+        temp = adata_train.obs[condition_keys].astype(str).map(extended_rep_dict).values
+        adata_train.obsm[condition_rep_keys] = convert_mixed_array_to_2d(temp) 
+        
+        if adata_test is not None:
+            temp = adata_test.obs[condition_keys].astype(str).map(extended_rep_dict).values
             adata_test.obsm[condition_rep_keys] = convert_mixed_array_to_2d(temp)
+
     else:
         raise ValueError("need condition_rep_dict")
     
