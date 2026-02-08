@@ -128,3 +128,56 @@ def get_origin_expression(adata, model, sample_rep, target_library_size=1e4, bat
     print(f"Reconstruction finished. Adata X shape: {adata.X.shape}")
     del recon_list
     gc.collect()
+
+
+def classify_perturbations(train_conds, test_conds, ctrl_tag='ctrl'):
+    # 1. 构建训练集基因词表 (Vocabulary)
+    # 提取训练集中出现过的所有非ctrl的基因/扰动
+    train_genes_vocab = set()
+    for cond in train_conds:
+        parts = cond.split('+')
+        for p in parts:
+            if p != ctrl_tag:
+                train_genes_vocab.add(p)
+    
+    print(f"训练集中包含的唯一扰动源数量: {len(train_genes_vocab)}")
+    
+    # 2. 初始化结果字典
+    results = {
+        "single_new": [],      # 单扰动：train中未出现的基因
+        "single_seen": [],     # 单扰动：train中出现的基因
+        "double_0": [],        # 双扰动：包含0个train基因 (两个都是新基因)
+        "double_1": [],        # 双扰动：包含1个train基因 (一新一旧)
+        "double_2": [],        # 双扰动：包含2个train基因 (两个都是旧基因，但组合可能是新的)
+        "control": []          # 纯对照 (ctrl+ctrl)
+    }
+    
+    # 3. 遍历测试集进行分类
+    for cond in test_conds:
+        # 分割并移除 ctrl 标记
+        parts = cond.split('+')
+        genes = [p for p in parts if p != ctrl_tag]
+        
+        # 判断类型
+        if len(genes) == 0:
+            results["control"].append(cond)
+            
+        elif len(genes) == 1:
+            # 单扰动逻辑
+            gene = genes[0]
+            if gene in train_genes_vocab:
+                results["single_seen"].append(cond)
+            else:
+                results["single_new"].append(cond)
+                
+        elif len(genes) == 2:
+            # 双扰动逻辑：计算有几个基因在训练集中出现过
+            seen_count = sum(1 for g in genes if g in train_genes_vocab)
+            if seen_count == 0:
+                results["double_0"].append(cond)
+            elif seen_count == 1:
+                results["double_1"].append(cond)
+            elif seen_count == 2:
+                results["double_2"].append(cond)
+                
+    return results, train_genes_vocab

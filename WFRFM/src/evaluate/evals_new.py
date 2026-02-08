@@ -9,7 +9,7 @@ from scipy.spatial.distance import cosine
 from sklearn.metrics import r2_score
 from scipy.stats import rankdata
 from scipy.spatial.distance import cdist
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr, spearmanr 
 from scipy.stats import wasserstein_distance
 
 
@@ -161,6 +161,15 @@ def evaluate_population_average(
         mse = np.mean((mean_true - mean_pred) ** 2)
         row['mse_gene'] = mse
 
+        # MAE
+        mae = np.mean(np.abs(mean_true - mean_pred))
+        row['mae_gene'] = mae
+
+        #R^2
+        var_true = np.var(mean_true) 
+        r2 = 1 - (mse / var_true)
+        row['r2_gene'] = r2
+
         # E-distance
         e_vals = []
         for seed in [random_seed*0, random_seed*1, random_seed*2, random_seed*3, random_seed*4]: # MC引入m_pred
@@ -184,10 +193,12 @@ def evaluate_population_average(
         delta_pred = mean_pred - ctrl_mean_gene
         if np.std(delta_true) == 0 or np.std(delta_pred) == 0:
             pcc_delta = 0.0
+            spearman_delta = 0.0
         else:
             pcc_delta, _ = pearsonr(delta_true, delta_pred)
+            spearman_delta, _ = spearmanr(delta_true, delta_pred)
         row['pcc_delta'] = pcc_delta
-
+        row['spearman_delta'] = spearman_delta
 
         metrics_list.append(row)
 
