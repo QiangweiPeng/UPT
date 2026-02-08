@@ -191,7 +191,9 @@ def batch_reconstruct_scvi(
                 'min_mass': float(m_pred.min()),
                 'max_mass': float(m_pred.max())
             }
-            
+
+            new_ad.layers["counts"] = new_ad.X.copy()
+            sc.pp.log1p(new_ad) # scvi得到的是raw count
             reconstructed_dict[cond_name] = new_ad
         else:
             reconstructed_dict[cond_name] = {
@@ -248,6 +250,8 @@ def batch_reconstruct_flatvi(
                 'mean_mass': float(m_pred.mean()),
                 'std_mass': float(m_pred.std())
             }
+            new_ad.layers["counts"] = new_ad.X.copy()
+            sc.pp.log1p(new_ad)
             reconstructed_dict[cond_name] = new_ad
         else:
             reconstructed_dict[cond_name] = {
@@ -332,6 +336,8 @@ def batch_reconstruct_state(
                     "target_library_size": float(target_library_size),
                 }
 
+            new_ad.layers["counts"] = new_ad.X.copy()
+            sc.pp.log1p(new_ad)
             reconstructed_dict[cond_name] = new_ad
         else:
             reconstructed_dict[cond_name] = {

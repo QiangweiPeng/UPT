@@ -42,22 +42,16 @@ def process_to_embedding(adata_control, adata_train,
         adata_test: Test.
     """
     if sample_rep == "X_pca":
-        sc.pp.normalize_total(adata_control, target_sum=1e4)
-        sc.pp.log1p(adata_control)
         centered_pca(adata_control, n_comps=n_comps, method="scanpy")
         var = np.asarray(adata_control.uns["pca"]["variance"])
         adata_control.obsm[sample_rep+"_scaled"] = adata_control.obsm[sample_rep] / np.sqrt(var)
         print(np.std(np.array(adata_control.obsm[sample_rep + "_scaled"]), axis=0))
 
-        sc.pp.normalize_total(adata_train, target_sum=1e4)
-        sc.pp.log1p(adata_train)
         project_pca(adata_train, ref_adata = adata_control, obsm_key_added="X_pca")
         adata_train.obsm[sample_rep+"_scaled"] = adata_train.obsm[sample_rep] / np.sqrt(var)
         print(np.std(np.array(adata_train.obsm[sample_rep + "_scaled"]), axis=0))
 
         if adata_test is not None:
-            sc.pp.normalize_total(adata_test, target_sum=1e4)
-            sc.pp.log1p(adata_test)
             project_pca(adata_test, ref_adata = adata_control, obsm_key_added="X_pca")
             adata_test.obsm[sample_rep+"_scaled"] = adata_test.obsm[sample_rep] / np.sqrt(var)
             print(np.std(np.array(adata_test.obsm[sample_rep + "_scaled"]), axis=0))

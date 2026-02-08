@@ -181,3 +181,226 @@ def classify_perturbations(train_conds, test_conds, ctrl_tag='ctrl'):
                 results["double_2"].append(cond)
                 
     return results, train_genes_vocab
+
+
+
+import pandas as pd
+from .inference import run_batch_inference
+from .inference import batch_reconstruct_pca, batch_reconstruct_scvi, batch_reconstruct_flatvi, batch_reconstruct_state
+from .evals_new import evaluate_latent,evaluate_population_average,evaluate_population_distribution
+import anndata as ad
+
+def _ensure_perturbation_col(df: pd.DataFrame, key="perturbation") -> pd.DataFrame:
+    """Ensure df has a 'perturbation' column; if it's in index, move it to a column."""
+    if df is None:
+        return None
+    df = df.copy()
+    if key not in df.columns:
+        # 常见：perturbation 在 index
+        if df.index.name == key:
+            df = df.reset_index()
+        else:
+            # 如果 index 看起来就是 perturbation（但没命名），也尝试兜底
+            if df.index.dtype == object:
+                df = df.reset_index().rename(columns={"index": key})
+            else:
+                raise ValueError(f"Cannot find '{key}' column or index in df.")
+    return df
+
+def _merge_on_perturbation(dfs, key="perturbation") -> pd.DataFrame:
+    """Outer-merge a list of dfs on perturbation and avoid duplicate column collisions."""
+    merged = None
+    for i, df in enumerate(dfs):
+        if df is None:
+            continue
+        df = _ensure_perturbation_col(df, key=key)
+
+        if merged is None:
+            merged = df
+            continue
+
+        # 若有重名列（除了 key），保留已有的，新增的加后缀
+        overlap = (set(merged.columns) & set(df.columns)) - {key}
+        if overlap:
+            df = df.rename(columns={c: f"{c}__dup{i}" for c in overlap})
+
+        merged = merged.merge(df, on=key, how="outer")
+
+    if merged is None:
+        merged = pd.DataFrame(columns=[key])
+
+    return merged
+
+def evaluate_all(
+    *,
+    model,
+    adata_control,
+    adata_train,
+    adata_test,
+    target_genes,
+    condition_keys,
+    control_key,
+    condition_rep_keys,
+    sample_rep,
+    device,
+    results_save_path,
+    n_particles: int = 10000,
+    random_seed: int = 42,
+    n_steps: int = 50,
+    scvi_model_load_path: str = None,
+    state_model_load_path: str = None,
+    run_origin_expression: bool = True,
+    origin_expression_batch_size: int = 2048,
+    do_log1p_when_not_pca: bool = True,
+    inplace_log1p: bool = False,
+    Edistance_sample_num: int = 200,
+    dist_max_cells: int = 200,
+    dist_max_genes: int = 100000,
+    dist_n_bins: int = 50,
+    dist_top_n_degs: int = 50,
+    save_each: bool = True,
+    save_final: bool = True,
+    final_filename: str = "final_metrics.csv",
+):
+    if adata_test is None:
+        raise ValueError("adata_test is None, but evaluation needs treated data (adata_treated).")
+
+    if not target_genes:
+        print("target_genes empty")
+        return [],[]
+    os.makedirs(results_save_path, exist_ok=True)
+
+    # ---- sample source cells ----
+    all_indices = np.arange(adata_control.n_obs)
+    rng = np.random.default_rng(random_seed)
+    indices = (
+        rng.choice(all_indices, n_particles, replace=False)
+        if n_particles < len(all_indices)
+        else all_indices
+    )
+
+    adata_source = torch.tensor(
+        adata_control.obsm[sample_rep][indices],
+        dtype=torch.float32,
+        device=device
+    )
+
+    # ---- inference ----
+    results_embedding = run_batch_inference(
+        model=model,
+        adata_source=adata_source,
+        adata_conditions=adata_test,
+        target_conditions=target_genes,
+        condition_keys=condition_keys,
+        embedding_key=condition_rep_keys,
+        source_rep=sample_rep,
+        n_steps=n_steps,
+        device=device,
+        random_seed=random_seed
+    )
+
+    # ---- reconstruct ----
+    results_genes = None
+    model_ref = None
+    model_train = None
+    model_test = None
+
+    # 我们可以reconstruct出原始基因表达
+    if sample_rep == "X_pca_scaled":
+        results_genes = batch_reconstruct_pca(
+            inference_results=results_embedding,  
+            ref_adata=adata_control        
+        )
+    elif sample_rep in ["X_scVI"]:
+        batch_data = adata_control.obs['_scvi_batch'].values[indices]
+        model_ref = scvi.model.SCVI.load(f"{scvi_model_load_path}_ref", adata=adata_control)
+        model_train = scvi.model.SCVI.load(f"{scvi_model_load_path}_train", adata=adata_control)
+        model_test = scvi.model.SCVI.load(f"{scvi_model_load_path}_test", adata=adata_control)
+        results_genes = batch_reconstruct_scvi(
+            inference_results=results_embedding,
+            scvi_model=model_ref,  # 传入模型
+            target_library_size=1e4, # 输出将被标准化到 10,000 counts
+            batch_idx = torch.full((n_particles, 1), 0, dtype=torch.long, device=device), #全部投射到第0个batch
+            # batch_idx = torch.tensor(adata_control.obs['_scvi_batch'].values[indices], dtype=torch.long, device=device).unsqueeze(1) # 如果希望都投射到第0个batch 可以直接不传或者传None
+        )
+    elif sample_rep =="X_flatvi":
+        model_ref = scvi.model.SCVI.load(f"{scvi_model_load_path}_ref", adata=adata_control)
+        results_genes = batch_reconstruct_flatvi(
+            inference_results=results_embedding,
+            flatvi_model=model_ref,
+            target_library_size=1e4,
+            var_names = adata_control.var_names
+        )
+    elif sample_rep == "X_state":
+        from src.preprocessing import NBDecoder, NBDecoderTrainer
+        z_dim = adata_control.obsm["X_state"].shape[1]
+        n_genes = adata_control.n_vars
+        state_decoder = NBDecoder(z_dim=z_dim, n_genes=n_genes, hidden=(1024,2048,4096), dropout=0.1)
+        trainer = NBDecoderTrainer(state_decoder, device="cuda", use_amp=False)
+        trainer.load(state_model_load_path)  # 会自动把 state_dict 加载到 trainer.decoder 里
+        state_decoder = trainer.decoder
+        state_decoder.eval()
+        
+        results_genes = batch_reconstruct_state(
+            inference_results=results_embedding,
+            state_decoder=state_decoder,
+            target_library_size=1e4,
+            var_names = adata_control.var_names
+        )
+
+
+
+    # ---- evaluate ----
+    latent_df = evaluate_latent(
+        results_embedding=results_embedding,
+        adata_treated=adata_test,
+        adata_control=adata_control,
+        pert_key=condition_keys,
+        control_label=control_key,
+        embedding_key=sample_rep
+    )
+    avg_df = evaluate_population_average(
+        results_genes=results_genes,
+        adata_treated=adata_test,
+        adata_control=adata_control,
+        pert_key=condition_keys,
+        control_label=control_key,
+        embedding_key=sample_rep,
+        Edistance_sample_num=Edistance_sample_num,
+        random_seed=random_seed
+    )
+    dist_df = evaluate_population_distribution(
+        results_genes=results_genes,
+        adata_treated=adata_test,
+        adata_control=adata_control,
+        pert_key=condition_keys,
+        max_cells=dist_max_cells,
+        max_genes=dist_max_genes,
+        n_bins=dist_n_bins,
+        top_n_degs=dist_top_n_degs,
+        seed=random_seed
+    )
+
+    # ---- save each ----
+    if save_each:
+        _ensure_perturbation_col(latent_df).to_csv(os.path.join(results_save_path, "latent_metrics.csv"), index=False)
+        _ensure_perturbation_col(avg_df).to_csv(os.path.join(results_save_path, "average_metrics.csv"), index=False)
+        _ensure_perturbation_col(dist_df).to_csv(os.path.join(results_save_path, "distribution_metrics.csv"), index=False)
+
+    # ---- merge into final df (the one you want) ----
+    final_df = _merge_on_perturbation([latent_df, avg_df, dist_df], key="perturbation")
+    final_df = final_df.sort_values("perturbation").reset_index(drop=True)
+
+    if save_final:
+        final_path = os.path.join(results_save_path, final_filename)
+        final_df.to_csv(final_path, index=False)
+
+    artifacts = {
+        "indices": indices,
+        "results_embedding": results_embedding,
+        "results_genes": results_genes,
+        "latent_df": latent_df,
+        "avg_df": avg_df,
+        "dist_df": dist_df,
+    }
+    return final_df, artifacts

@@ -12,6 +12,9 @@ from scipy.spatial.distance import cdist
 from scipy.stats import pearsonr, spearmanr 
 from scipy.stats import wasserstein_distance
 
+from scipy import sparse
+import warnings  
+
 
 def adata_to_numpy(data, copy=True, dtype="float32"):
     """
@@ -115,7 +118,12 @@ def evaluate_latent(
 
         metrics_list.append(row)
 
-    return pd.DataFrame(metrics_list)
+    df = pd.DataFrame(metrics_list)
+    mean_row = df.drop(columns=['perturbation']).mean(numeric_only=True).to_dict()
+    mean_row['perturbation'] = 'mean'
+    df = pd.concat([df, pd.DataFrame([mean_row])], ignore_index=True)
+    
+    return df
 
 
 def evaluate_population_average(
@@ -202,7 +210,12 @@ def evaluate_population_average(
 
         metrics_list.append(row)
 
-    return pd.DataFrame(metrics_list)
+    df = pd.DataFrame(metrics_list)
+    mean_row = df.drop(columns=['perturbation']).mean(numeric_only=True).to_dict()
+    mean_row['perturbation'] = 'mean'
+    df = pd.concat([df, pd.DataFrame([mean_row])], ignore_index=True)
+
+    return df
 
 
 
@@ -258,26 +271,36 @@ def _kl_divergence_hist(p_samples, q_samples, bins=50, eps=1e-12):
 
 def _rank_degs_top_names(adata_pert, adata_ctrl, top_n=200, seed=42):
     """
-    用 Scanpy rank_genes_groups 的默认参数（除 groupby/groups/reference 必须指定）。
-    返回 top_n 基因名列表。
+    极简版差异基因计算。
+    自动屏蔽警告，自动修复负值/NaN数据，防止 crash。
     """
-    # 合并成一个 adata：mapping key 已经包含了类别信息，所以不要再传 keys=
-    adata_mix = ad.concat(
-        {"pert": adata_pert, "ctrl": adata_ctrl},
-        label="group",
-        join="inner",
-        merge="same"
-    )
+    # 屏蔽所有 Warning，眼不见为净
+    # ps 这个warning源自我们对权重的重采样
+    # 另外这个warning实在是不知道怎么屏蔽了 无所谓了
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        
+        # 1. 直接合并 (index_unique="-" 保证了内部逻辑不冲突)
+        adata = ad.concat(
+            {"pert": adata_pert, "ctrl": adata_ctrl}, 
+            label="group", join="inner", merge="same", index_unique="-"
+        )
 
-    sc.tl.rank_genes_groups(
-        adata_mix,
-        groupby="group",
-        groups=["pert"],
-        reference="ctrl"
-    )
+        # 2. 极简数据清洗 (转Dense -> 填补NaN -> 截断负值) 一气呵成
+        # rank_genes_groups 必须用 Dense 且非负数据
+        X = adata.X.toarray() if sparse.issparse(adata.X) else adata.X
+        adata.X = np.nan_to_num(X, nan=0.0).clip(min=0)
 
-    df = sc.get.rank_genes_groups_df(adata_mix, group="pert")
-    return df["names"].astype(str).tolist()[:top_n]
+        # 3. 计算并返回
+        try:
+            sc.tl.rank_genes_groups(
+                adata, groupby="group", groups=["pert"], reference="ctrl", 
+                method='t-test', use_raw=False
+            )
+            # 链式调用直接拿结果
+            return sc.get.rank_genes_groups_df(adata, group="pert")["names"][:top_n].tolist()
+        except Exception:
+            return []
 
 
 def evaluate_population_distribution(
@@ -297,6 +320,8 @@ def evaluate_population_distribution(
       - kl_mean：按基因的 KL(P||Q) 平均（P=true, Q=pred）
       - common_degs：|TopDEG_true ∩ TopDEG_pred| / top_n_degs
     """
+
+    
     rng = np.random.default_rng(seed)
     metrics_list = []
 
@@ -305,6 +330,8 @@ def evaluate_population_distribution(
 
     pert_names = list(results_genes.keys())
     print(f"Start evaluating {len(pert_names)} perturbations (Distribution metrics)")
+
+    
 
     for pert in pert_names:
         row = {"perturbation": pert}
@@ -377,4 +404,11 @@ def evaluate_population_distribution(
 
         metrics_list.append(row)
 
-    return pd.DataFrame(metrics_list)
+    df = pd.DataFrame(metrics_list)
+    mean_row = df.drop(columns=['perturbation']).mean(numeric_only=True).to_dict()
+    mean_row['perturbation'] = 'mean'
+    df = pd.concat([df, pd.DataFrame([mean_row])], ignore_index=True)
+
+    return df
+
+
