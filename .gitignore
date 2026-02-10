@@ -1,6 +1,7 @@
 WFRFM/data/*
 WFRFM/experiments/*
 WFRFM/results/*
+WFRFM/*.pkl
 
 !WFRFM/data/raw/
 WFRFM/data/raw/*

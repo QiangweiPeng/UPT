@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import gc
+import scvi
 
 
 def draw_loss(load_path = None,eval_interval = 10,cut = 0,save_path = None):
@@ -127,6 +128,8 @@ def get_origin_expression(adata, model, sample_rep, target_library_size=1e4, bat
     adata.X = X_recon
     print(f"Reconstruction finished. Adata X shape: {adata.X.shape}")
     del recon_list
+    if 'log1p' in adata.uns:
+        del adata.uns['log1p']
     gc.collect()
 
 
@@ -235,7 +238,6 @@ def evaluate_all(
     *,
     model,
     adata_control,
-    adata_train,
     adata_test,
     target_genes,
     condition_keys,
@@ -261,6 +263,7 @@ def evaluate_all(
     save_each: bool = True,
     save_final: bool = True,
     final_filename: str = "final_metrics.csv",
+    detailed: bool = True # 是否只放出mean
 ):
     if adata_test is None:
         raise ValueError("adata_test is None, but evaluation needs treated data (adata_treated).")
@@ -320,7 +323,7 @@ def evaluate_all(
             inference_results=results_embedding,
             scvi_model=model_ref,  # 传入模型
             target_library_size=1e4, # 输出将被标准化到 10,000 counts
-            batch_idx = torch.full((n_particles, 1), 0, dtype=torch.long, device=device), #全部投射到第0个batch
+            batch_idx = None, #全部投射到第0个batch
             # batch_idx = torch.tensor(adata_control.obs['_scvi_batch'].values[indices], dtype=torch.long, device=device).unsqueeze(1) # 如果希望都投射到第0个batch 可以直接不传或者传None
         )
     elif sample_rep =="X_flatvi":
@@ -389,7 +392,10 @@ def evaluate_all(
 
     # ---- merge into final df (the one you want) ----
     final_df = _merge_on_perturbation([latent_df, avg_df, dist_df], key="perturbation")
-    final_df = final_df.sort_values("perturbation").reset_index(drop=True)
+    if detailed:
+        final_df = final_df.sort_values("perturbation").reset_index(drop=True)
+    else:
+        final_df = final_df[final_df["perturbation"] == "mean"].reset_index(drop=True)
 
     if save_final:
         final_path = os.path.join(results_save_path, final_filename)

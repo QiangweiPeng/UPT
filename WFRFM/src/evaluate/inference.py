@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import anndata as ad
 from tqdm import tqdm
+import scanpy as sc
 
 @torch.no_grad()
 def wfr_euler_solve(

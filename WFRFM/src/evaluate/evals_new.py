@@ -206,6 +206,24 @@ def evaluate_population_average(
         r2 = 1 - (mse / var_true)
         row['r2_gene'] = r2
 
+        # deg 50 
+        diff_abs = np.abs(mean_true - ctrl_mean_gene)
+        
+        # 获取差异最大的 50 个基因的索引 (argsort 默认升序，取最后50个)
+        top50_idx = np.argsort(diff_abs)[-50:]
+        
+        # 2. 提取这 50 个基因的 True 和 Pred
+        mean_true_deg = mean_true[top50_idx]
+        mean_pred_deg = mean_pred[top50_idx]
+        
+
+        mse_deg = np.mean((mean_true_deg - mean_pred_deg) ** 2)
+        var_true_deg = np.var(mean_true_deg)
+        r2_deg = 1 - (mse_deg / var_true_deg)
+        
+        row['r2_gene_deg50'] = r2_deg
+        row['mse_gene_deg50'] = mse_deg
+
         # E-distance
         e_vals = []
         for seed in [random_seed*0, random_seed*1, random_seed*2, random_seed*3, random_seed*4]: # MC引入m_pred

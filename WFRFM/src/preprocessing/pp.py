@@ -24,6 +24,7 @@ def process_to_embedding(adata_control, adata_train,
                          control_key = "is_control",
                          condition_keys = "target_gene",
                          condition_rep_keys = "gene_embeddings",
+                         batch_key = "batch",
                          condition_rep_dict = None,
                          flatvi_kwargs = None,
                          device = "cuda"):
@@ -65,7 +66,7 @@ def process_to_embedding(adata_control, adata_train,
             scvi.model.SCVI.setup_anndata(
                 adata_control, 
                 layer="counts", 
-                batch_key="batch",  # 自动去批次
+                batch_key=batch_key,  # 自动去批次
             )
             model_ref = scvi.model.SCVI(
                 adata_control, 
@@ -91,7 +92,7 @@ def process_to_embedding(adata_control, adata_train,
                 adata_train, 
                 model_ref
             )
-            model_train.train(max_epochs=10, plan_kwargs=dict(weight_decay=0.0))
+            model_train.train(max_epochs=100, plan_kwargs=dict(weight_decay=0.0))
             model_train.save(f"{model_save_path}_train", overwrite=True)
         adata_train.obsm[sample_rep] = model_train.get_latent_representation()
 
@@ -101,7 +102,7 @@ def process_to_embedding(adata_control, adata_train,
                     adata_test, 
                     model_ref
                 )
-                model_test.train(max_epochs=10, plan_kwargs=dict(weight_decay=0.0))
+                model_test.train(max_epochs=100, plan_kwargs=dict(weight_decay=0.0))
                 model_test.save(f"{model_save_path}_test", overwrite=True)
             adata_test.obsm[sample_rep] = model_test.get_latent_representation()
             
@@ -178,7 +179,7 @@ def process_to_embedding(adata_control, adata_train,
                     elif g1 in condition_rep_dict and g2 in condition_rep_dict:
                         vec1 = np.array(condition_rep_dict[g1])
                         vec2 = np.array(condition_rep_dict[g2])
-                        extended_rep_dict[key] = vec1 + vec2              
+                        extended_rep_dict[key] = (vec1 + vec2)/2           
                     else:
                         raise KeyError(f"Components of '{key}' not found in condition_rep_dict")
                 else:
