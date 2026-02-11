@@ -192,19 +192,28 @@ def evaluate_population_average(
         
         mean_true = np.nanmean(X_true, axis=0)
         mean_pred = np.average(X_pred, axis=0, weights = m_pred) # 根据 m_pred 加权
+        mean_ctrl = np.nanmean(X_ctrl)
 
         # MSE
         mse = np.mean((mean_true - mean_pred) ** 2)
         row['mse_gene'] = mse
 
+        if detailed:
+            mse_true = np.mean((mean_true - mean_ctrl)**2)
+            row['mse_true'] = mse_true
+
         # MAE
         mae = np.mean(np.abs(mean_true - mean_pred))
         row['mae_gene'] = mae
+
 
         #R^2
         var_true = np.var(mean_true) 
         r2 = 1 - (mse / var_true)
         row['r2_gene'] = r2
+
+        if detailed:
+            row['r2_true'] = 1 - ( mse_true / np.var(mean_ctrl))
 
         # deg 50 
         diff_abs = np.abs(mean_true - ctrl_mean_gene)
