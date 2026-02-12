@@ -151,7 +151,7 @@ class FlatVIEmbedding:
         
         early_stopping = EarlyStopping(
             monitor='val/loss',
-            patience=50,
+            patience=30,
             mode='min'
         )
         callbacks.append(early_stopping)

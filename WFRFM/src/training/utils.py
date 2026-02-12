@@ -11,7 +11,7 @@ import random
 
     
 
-def compute_uot_plan_gpu(X_source, X_target, delta=1, reg_m=1, use_mini_batch_uot=False, group_number=5,draw=False):
+def compute_uot_plan_gpu(X_source, X_target,m_source=1,m_target=1, delta=1, reg_m=1, use_mini_batch_uot=False, group_number=5,draw=False):
     """
     如果数据量大了cpu跑不动 需要gpu版本
     mini_batch代实现
@@ -37,8 +37,8 @@ def compute_uot_plan_gpu(X_source, X_target, delta=1, reg_m=1, use_mini_batch_uo
         cost_matrix = -torch.log(torch.where(cos_sq == 0, epsilon, cos_sq))
 
         if not use_mini_batch_uot:
-            a = torch.ones(n_source, device=device)
-            b = torch.ones(n_target, device=device)
+            a = torch.full((n_source,), m_source, device=device, dtype=torch.float)
+            b = torch.full((n_target,), m_target, device=device, dtype=torch.float)
             G = ot.unbalanced.mm_unbalanced(a, b, cost_matrix, reg_m=reg_m, numItermax=1000)
         else:
             pass
@@ -103,7 +103,18 @@ def pre_compute_wfr_ot(adata_control,
     让ai写了一个断点重连逻辑
     另外把result中储存方式改成了字典
     """
-    
+
+
+    if "normalized_m" in adata_control.uns:
+        m_source = adata_control.uns["normalized_m"]
+    else:
+        m_source = 1
+
+    if "normalized_m" in adata_treated.uns:
+        m_target = adata_treated.uns["normalized_m"]
+    else:
+        m_target = 1 
+
     X_control = adata_control.obsm[sample_rep]
     control_obs_names = adata_control.obs_names.to_numpy()
     all_conditions = adata_treated.obs[condition_keys].unique().tolist()
@@ -147,6 +158,7 @@ def pre_compute_wfr_ot(adata_control,
             
             gamma, g0, g1 = compute_uot_plan_gpu(
                 X_control, X_treat_cur, 
+                m_source = m_source, m_target = m_target,
                 delta=delta, reg_m = reg_m,
                 use_mini_batch_uot=use_mini_batch_uot, 
                 group_number=group_number,

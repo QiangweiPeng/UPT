@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import anndata as ad
 from tqdm import tqdm
+import scanpy as sc
 
 @torch.no_grad()
 def wfr_euler_solve(
@@ -163,6 +164,7 @@ def batch_reconstruct_scvi(
         
         library_tensor = torch.zeros((n_obs, 1), device=device) 
 
+        scvi_model.module.eval()
         with torch.no_grad():
             outputs = scvi_model.module.generative(
                 z=z_tensor, 
@@ -190,7 +192,9 @@ def batch_reconstruct_scvi(
                 'min_mass': float(m_pred.min()),
                 'max_mass': float(m_pred.max())
             }
-            
+
+            new_ad.layers["counts"] = new_ad.X.copy()
+            sc.pp.log1p(new_ad) # scvi得到的是raw count
             reconstructed_dict[cond_name] = new_ad
         else:
             reconstructed_dict[cond_name] = {
@@ -201,8 +205,6 @@ def batch_reconstruct_scvi(
     return reconstructed_dict
 
 
-
-# 在 src/evaluate/inference.py 中添加
 
 def batch_reconstruct_flatvi(
     inference_results: dict,
@@ -249,6 +251,8 @@ def batch_reconstruct_flatvi(
                 'mean_mass': float(m_pred.mean()),
                 'std_mass': float(m_pred.std())
             }
+            new_ad.layers["counts"] = new_ad.X.copy()
+            sc.pp.log1p(new_ad)
             reconstructed_dict[cond_name] = new_ad
         else:
             reconstructed_dict[cond_name] = {
@@ -256,4 +260,90 @@ def batch_reconstruct_flatvi(
                 'mass': m_pred
             }
     
+    return reconstructed_dict
+
+
+
+@torch.no_grad()
+def batch_reconstruct_state(
+    inference_results: dict,
+    state_decoder,                     # 你的 NBDecoder（或同结构 decoder）
+    var_names,                         # gene names（list/Index）
+    target_library_size: float = 1e4,  # 标准化到多少 counts
+    store_as_anndata: bool = True,
+    device: str | None = None,
+) -> dict:
+    """
+    输入 inference_results:
+      {
+        "TP53": {"z_pred": (n_obs, z_dim) 或 torch.Tensor, "m_pred": (n_obs,1) 可选},
+        ...
+      }
+
+    输出:
+      如果 store_as_anndata=True:
+        {"TP53": AnnData(X=normalized_gene_expression), ...}
+      否则:
+        {"TP53": {"X": np.ndarray, "mass": m_pred}, ...}
+
+    逻辑（对齐 scVI）:
+      1) scale = softmax(decoder.scale_head(decoder.backbone(z)))
+      2) X_recon = scale * target_library_size
+      3) 可选把 m_pred 存到 obs['mass']
+    """
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    state_decoder = state_decoder.to(device).eval()
+
+    reconstructed_dict = {}
+
+    for cond_name, result_dict in tqdm(inference_results.items()):
+        z_pred = result_dict["z_pred"]
+        m_pred = result_dict.get("m_pred", None)
+
+        # --- z to tensor ---
+        if isinstance(z_pred, np.ndarray):
+            z = torch.from_numpy(z_pred).float().to(device)
+        elif torch.is_tensor(z_pred):
+            z = z_pred.float().to(device)
+        else:
+            z = torch.tensor(z_pred, dtype=torch.float32, device=device)
+
+        n_obs = z.shape[0]
+
+        # --- scVI-like decoder: get px_scale ---
+        h = state_decoder.backbone(z)                           # (B,H)
+        scale = torch.softmax(state_decoder.scale_head(h), -1)  # (B,G), row-sum=1
+
+        X_recon = (scale * float(target_library_size)).cpu().numpy()  # (B,G)
+
+        if store_as_anndata:
+            new_ad = ad.AnnData(X=X_recon.astype(np.float32))
+            new_ad.var_names = var_names
+            new_ad.obs["condition"] = cond_name
+
+            if m_pred is not None:
+                new_ad.obs["mass"] = np.asarray(m_pred).reshape(-1)
+
+                mp = np.asarray(m_pred).reshape(-1)
+                new_ad.uns["reconstruction_params"] = {
+                    "target_library_size": float(target_library_size),
+                    "mean_mass": float(mp.mean()),
+                    "std_mass": float(mp.std()),
+                    "min_mass": float(mp.min()),
+                    "max_mass": float(mp.min()),
+                }
+            else:
+                new_ad.uns["reconstruction_params"] = {
+                    "target_library_size": float(target_library_size),
+                }
+
+            new_ad.layers["counts"] = new_ad.X.copy()
+            sc.pp.log1p(new_ad)
+            reconstructed_dict[cond_name] = new_ad
+        else:
+            reconstructed_dict[cond_name] = {
+                "X": X_recon,
+                "mass": m_pred,
+            }
+
     return reconstructed_dict
