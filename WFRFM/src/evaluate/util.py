@@ -370,7 +370,8 @@ def evaluate_all(
         control_label=control_key,
         embedding_key=sample_rep,
         Edistance_sample_num=Edistance_sample_num,
-        random_seed=random_seed
+        random_seed=random_seed,
+        detailed = detailed
     )
     dist_df = evaluate_population_distribution(
         results_genes=results_genes,

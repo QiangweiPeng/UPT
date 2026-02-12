@@ -6,10 +6,29 @@ import anndata as ad
 import scanpy as sc
 import scvi
 import os
+import scipy.sparse as sp
 
 from .utils import convert_mixed_array_to_2d
 from .pca import centered_pca, project_pca, reconstruct_pca
 from .flatvi_wrapper import FlatVIEmbedding
+
+
+
+def combined_view(adata_a,adata_b,batch_key=None):
+
+    assert adata_a.n_vars == adata_b.n_vars
+    assert (adata_a.var_names == adata_b.var_names).all()
+
+    if sp.issparse(adata_a.X) or sp.issparse(adata_b.X):
+        X = sp.vstack([adata_a.X, adata_b.X])
+    else:
+        X = np.vstack([adata_a.X, adata_b.X])
+
+    if batch_key is None:
+        return ad.AnnData(X=X, var=adata_a.var.copy())
+    else:
+        obs = pd.concat([adata_a.obs, adata_b.obs], axis=0) 
+        return ad.AnnData(X=X, obs=obs.copy(), var=adata_a.var.copy())
 
 def process_to_embedding(adata_control, adata_train, 
                          adata_test = None,
@@ -43,33 +62,44 @@ def process_to_embedding(adata_control, adata_train,
         adata_test: Test.
     """
     if sample_rep == "X_pca":
-        centered_pca(adata_control, n_comps=n_comps, method="scanpy")
-        var = np.asarray(adata_control.uns["pca"]["variance"])
+        # adata_combined = combined_view(adata_control,adata_train) # 改为在control和train上embedding
+        adata_combined = ad.concat([adata_control, adata_train], join='inner')
+        
+        centered_pca(adata_combined, n_comps=n_comps, method="scanpy")
+        var = np.asarray(adata_combined.uns["pca"]["variance"])
+        # 需要这些参数满足后续构建
+        adata_control.uns["pca"] = adata_combined.uns["pca"].copy()
+        adata_control.varm["PCs"] = adata_combined.varm["PCs"].copy()
+        adata_control.varm["X_mean"] = adata_combined.varm["X_mean"].copy()
+
+        n_c = adata_control.n_obs
+        adata_control.obsm[sample_rep] = adata_combined.obsm["X_pca"][:n_c]
         adata_control.obsm[sample_rep+"_scaled"] = adata_control.obsm[sample_rep] / np.sqrt(var)
         print(np.std(np.array(adata_control.obsm[sample_rep + "_scaled"]), axis=0))
 
-        project_pca(adata_train, ref_adata = adata_control, obsm_key_added="X_pca")
+        adata_train.obsm[sample_rep] = adata_combined.obsm["X_pca"][n_c:]
         adata_train.obsm[sample_rep+"_scaled"] = adata_train.obsm[sample_rep] / np.sqrt(var)
         print(np.std(np.array(adata_train.obsm[sample_rep + "_scaled"]), axis=0))
 
         if adata_test is not None:
-            project_pca(adata_test, ref_adata = adata_control, obsm_key_added="X_pca")
+            project_pca(adata_test, ref_adata = adata_combined, obsm_key_added="X_pca")
             adata_test.obsm[sample_rep+"_scaled"] = adata_test.obsm[sample_rep] / np.sqrt(var)
             print(np.std(np.array(adata_test.obsm[sample_rep + "_scaled"]), axis=0))
+        del adata_combined
 
     elif sample_rep == "X_scVI":
 
         scvi.settings.dl_num_workers = 12
         if model_ref is None:
-            # 依然是在control上训练
+            adata_combined = ad.concat([adata_control, adata_train], join='inner') 
             print("training scvi model_ref")
             scvi.model.SCVI.setup_anndata(
-                adata_control, 
+                adata_combined, 
                 layer="counts", 
                 batch_key=batch_key,  # 自动去批次
             )
             model_ref = scvi.model.SCVI(
-                adata_control, 
+                adata_combined, 
                 n_latent=n_comps, 
                 n_hidden = n_hidden,
                 n_layers = n_layers,
@@ -83,18 +113,23 @@ def process_to_embedding(adata_control, adata_train,
                 plan_kwargs={"lr": 1e-4}
             )
             model_ref.save(f"{model_save_path}_ref", overwrite=True)
-        adata_control.obsm[sample_rep] = model_ref.get_latent_representation()
+            
+            full_latent = model_ref.get_latent_representation()
+            n_c = adata_control.n_obs
+            
+            adata_control.obsm[sample_rep] = full_latent[:n_c]
+            adata_train.obsm[sample_rep] = full_latent[n_c:]
+            
+            del adata_combined
+        else:
+            print("Using loaded model_ref for Control and Train inference...")
+            adata_control.obsm[sample_rep] = model_ref.get_latent_representation(adata_control)
+            adata_train.obsm[sample_rep] = model_ref.get_latent_representation(adata_train)
 
-        print("projecting")
-        # train和test project到上面的空间
+        # 为了兼容后续代码
         if model_train is None:
-            model_train = scvi.model.SCVI.load_query_data(
-                adata_train, 
-                model_ref
-            )
-            model_train.train(max_epochs=100, plan_kwargs=dict(weight_decay=0.0))
+            model_train = model_ref
             model_train.save(f"{model_save_path}_train", overwrite=True)
-        adata_train.obsm[sample_rep] = model_train.get_latent_representation()
 
         if adata_test is not None:
             if model_test is None:
@@ -112,6 +147,7 @@ def process_to_embedding(adata_control, adata_train,
             print("Test Std:", np.std(adata_test.obsm[sample_rep], axis=0))
 
     elif sample_rep == "X_flatvi":
+        adata_combined = ad.concat([adata_control, adata_train], join='inner') 
         if flatvi_kwargs is None:
             flatvi_kwargs = {
                 'n_latent': n_comps,
@@ -123,10 +159,10 @@ def process_to_embedding(adata_control, adata_train,
         flatvi_model = FlatVIEmbedding(**flatvi_kwargs)
         model_path = f"{model_save_path}/model.pt"
         if os.path.exists(model_path):
-            flatvi_model.load_model_weights(model_path, in_dim=adata_control.n_vars)
+            flatvi_model.load_model_weights(model_path, in_dim=adata_combined.n_vars)
         else:
             flatvi_model.train_model(
-                adata_control,
+                adata_combined,
                 max_epochs=150,
                 batch_size=256,
                 save_path=model_save_path 
@@ -145,6 +181,7 @@ def process_to_embedding(adata_control, adata_train,
         if adata_test is not None:
             print("Test Std:", np.std(adata_test.obsm[sample_rep], axis=0)[:5])
         model_ref = flatvi_model
+        del adata_combined
 
     elif sample_rep == "X_state":
         print("Control Std:", np.std(adata_control.obsm[sample_rep], axis=0))

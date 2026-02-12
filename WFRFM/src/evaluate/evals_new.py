@@ -109,9 +109,6 @@ def evaluate_latent(
 ):
     metrics_list = []
     
-    ctrl_X = adata_to_numpy(adata_control)
-    ctrl_mean_gene = np.nanmean(ctrl_X, axis=0)
-    
     true_emb_ctrl = get_embedding(adata_control, embedding_key)
     ctrl_mean_latent = np.nanmean(true_emb_ctrl, axis=0)
 
@@ -163,11 +160,12 @@ def evaluate_population_average(
     embedding_key="sample_rep_scaled", 
     Edistance_sample_num = 2000,
     random_seed = 42,
+    detailed = True
 ):
     metrics_list = []
     
-    ctrl_X = adata_to_numpy(adata_control)
-    ctrl_mean_gene = np.nanmean(ctrl_X, axis=0)
+    X_ctrl = adata_to_numpy(adata_control)
+    mean_ctrl = np.nanmean(X_ctrl, axis=0)
     
     # true_emb_ctrl = get_embedding(adata_control, embedding_key)
     # ctrl_mean_latent = np.nanmean(true_emb_ctrl, axis=0)
@@ -192,7 +190,6 @@ def evaluate_population_average(
         
         mean_true = np.nanmean(X_true, axis=0)
         mean_pred = np.average(X_pred, axis=0, weights = m_pred) # 根据 m_pred 加权
-        mean_ctrl = np.nanmean(X_ctrl)
 
         # MSE
         mse = np.mean((mean_true - mean_pred) ** 2)
@@ -215,23 +212,20 @@ def evaluate_population_average(
         if detailed:
             row['r2_true'] = 1 - ( mse_true / np.var(mean_ctrl))
 
-        # deg 50 
-        diff_abs = np.abs(mean_true - ctrl_mean_gene)
-        
-        # 获取差异最大的 50 个基因的索引 (argsort 默认升序，取最后50个)
+        # deg 50  这里deg逻辑和scanpy不同
+        diff_abs = np.abs(mean_true - mean_ctrl)
         top50_idx = np.argsort(diff_abs)[-50:]
         
-        # 2. 提取这 50 个基因的 True 和 Pred
         mean_true_deg = mean_true[top50_idx]
         mean_pred_deg = mean_pred[top50_idx]
         
-
         mse_deg = np.mean((mean_true_deg - mean_pred_deg) ** 2)
         var_true_deg = np.var(mean_true_deg)
         r2_deg = 1 - (mse_deg / var_true_deg)
         
         row['r2_gene_deg50'] = r2_deg
         row['mse_gene_deg50'] = mse_deg
+
 
         # E-distance
         e_vals = []
@@ -252,8 +246,8 @@ def evaluate_population_average(
         row['e_distance_std'] = np.std(e_vals)
 
         # PCC delta
-        delta_true = mean_true - ctrl_mean_gene
-        delta_pred = mean_pred - ctrl_mean_gene
+        delta_true = mean_true - mean_ctrl
+        delta_pred = mean_pred - mean_ctrl
         if np.std(delta_true) == 0 or np.std(delta_pred) == 0:
             pcc_delta = 0.0
             spearman_delta = 0.0
