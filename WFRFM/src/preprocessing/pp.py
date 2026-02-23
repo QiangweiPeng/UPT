@@ -31,6 +31,7 @@ def combined_view(adata_a,adata_b,batch_key=None):
         return ad.AnnData(X=X, obs=obs.copy(), var=adata_a.var.copy())
 
 def process_to_embedding(adata_control, adata_train, 
+                         adata_ref = None, #可以传入一个ref来直接project pca
                          adata_test = None,
                          sample_rep = "X_pca", # X_ae; X_state
                          n_comps = 100,
@@ -46,6 +47,7 @@ def process_to_embedding(adata_control, adata_train,
                          batch_key = "batch",
                          condition_rep_dict = None,
                          flatvi_kwargs = None,
+                         pca_method = "scanpy",
                          device = "cuda"):
     """ Process data into embedding.
         centered_pca control group as standard.
@@ -62,30 +64,52 @@ def process_to_embedding(adata_control, adata_train,
         adata_test: Test.
     """
     if sample_rep == "X_pca":
-        # adata_combined = combined_view(adata_control,adata_train) # 改为在control和train上embedding
-        adata_combined = ad.concat([adata_control, adata_train], join='inner')
-        
-        centered_pca(adata_combined, n_comps=n_comps, method="scanpy")
-        var = np.asarray(adata_combined.uns["pca"]["variance"])
-        # 需要这些参数满足后续构建
-        adata_control.uns["pca"] = adata_combined.uns["pca"].copy()
-        adata_control.varm["PCs"] = adata_combined.varm["PCs"].copy()
-        adata_control.varm["X_mean"] = adata_combined.varm["X_mean"].copy()
+        if adata_ref is not None:
+            var = np.asarray(adata_ref.uns["pca"]["variance"])
 
-        n_c = adata_control.n_obs
-        adata_control.obsm[sample_rep] = adata_combined.obsm["X_pca"][:n_c]
-        adata_control.obsm[sample_rep+"_scaled"] = adata_control.obsm[sample_rep] / np.sqrt(var)
-        print(np.std(np.array(adata_control.obsm[sample_rep + "_scaled"]), axis=0))
+            project_pca(adata_control, ref_adata = adata_ref, obsm_key_added="X_pca")
+            adata_control.obsm["X_pca_scaled"] = adata_control.obsm["X_pca"] / np.sqrt(var)
+            print(np.std(np.array(adata_control.obsm[sample_rep + "_scaled"]), axis=0))
+            
+            adata_control.uns["pca"] = adata_ref.uns["pca"].copy()
+            adata_control.varm["PCs"] = adata_ref.varm["PCs"].copy()
+            adata_control.varm["X_mean"] = adata_ref.varm["X_mean"].copy()
+            
+            project_pca(adata_train, ref_adata = adata_ref, obsm_key_added="X_pca")
+            adata_train.obsm["X_pca_scaled"] = adata_train.obsm["X_pca"] / np.sqrt(var)
+            print(np.std(np.array(adata_train.obsm[sample_rep + "_scaled"]), axis=0))
 
-        adata_train.obsm[sample_rep] = adata_combined.obsm["X_pca"][n_c:]
-        adata_train.obsm[sample_rep+"_scaled"] = adata_train.obsm[sample_rep] / np.sqrt(var)
-        print(np.std(np.array(adata_train.obsm[sample_rep + "_scaled"]), axis=0))
+            if adata_test is not None:
+                project_pca(adata_test, ref_adata = adata_ref, obsm_key_added="X_pca")
+                adata_test.obsm["X_pca_scaled"] = adata_test.obsm["X_pca"] / np.sqrt(var)
+                print(np.std(np.array(adata_test.obsm[sample_rep + "_scaled"]), axis=0))
 
-        if adata_test is not None:
-            project_pca(adata_test, ref_adata = adata_combined, obsm_key_added="X_pca")
-            adata_test.obsm[sample_rep+"_scaled"] = adata_test.obsm[sample_rep] / np.sqrt(var)
-            print(np.std(np.array(adata_test.obsm[sample_rep + "_scaled"]), axis=0))
-        del adata_combined
+        else:
+            
+            # adata_combined = combined_view(adata_control,adata_train) # 改为在control和train上embedding
+            adata_combined = ad.concat([adata_control, adata_train], join='inner')
+            
+            centered_pca(adata_combined, n_comps=n_comps, method=pca_method)
+            var = np.asarray(adata_combined.uns["pca"]["variance"])
+            # 需要这些参数满足后续构建
+            adata_control.uns["pca"] = adata_combined.uns["pca"].copy()
+            adata_control.varm["PCs"] = adata_combined.varm["PCs"].copy()
+            adata_control.varm["X_mean"] = adata_combined.varm["X_mean"].copy()
+    
+            n_c = adata_control.n_obs
+            adata_control.obsm[sample_rep] = adata_combined.obsm["X_pca"][:n_c]
+            adata_control.obsm[sample_rep+"_scaled"] = adata_control.obsm[sample_rep] / np.sqrt(var)
+            print(np.std(np.array(adata_control.obsm[sample_rep + "_scaled"]), axis=0))
+    
+            adata_train.obsm[sample_rep] = adata_combined.obsm["X_pca"][n_c:]
+            adata_train.obsm[sample_rep+"_scaled"] = adata_train.obsm[sample_rep] / np.sqrt(var)
+            print(np.std(np.array(adata_train.obsm[sample_rep + "_scaled"]), axis=0))
+    
+            if adata_test is not None:
+                project_pca(adata_test, ref_adata = adata_combined, obsm_key_added="X_pca")
+                adata_test.obsm[sample_rep+"_scaled"] = adata_test.obsm[sample_rep] / np.sqrt(var)
+                print(np.std(np.array(adata_test.obsm[sample_rep + "_scaled"]), axis=0))
+            del adata_combined
 
     elif sample_rep == "X_scVI":
 

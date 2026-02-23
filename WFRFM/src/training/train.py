@@ -125,3 +125,26 @@ def train_model(adata_control, adata_treated, adata_test,
                     except OSError:
                         pass
                 last_ckpt_path = ckpt_path
+
+    if n_iterations % save_interval != 0:
+        if save_path is not None:
+                ckpt_path = f"{save_path}_epoch_{n_iterations}.pt"
+                torch.save({
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(), 
+                    'vloss_list': vloss_list,
+                    'gloss_list': gloss_list,
+                    'loss_list': loss_list,
+                    'test_loss_list': test_loss_list,
+                    'test_vloss_list': test_vloss_list,
+                    'test_gloss_list': test_gloss_list
+                }, ckpt_path)
+                logging.info(f"Model and training state saved to {ckpt_path}")
+
+                if last_ckpt_path is not None and os.path.isfile(last_ckpt_path) and save_only_last:
+                    try:
+                        os.remove(last_ckpt_path)
+                    except OSError:
+                        pass
+                last_ckpt_path = ckpt_path

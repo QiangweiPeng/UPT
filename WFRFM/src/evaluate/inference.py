@@ -11,7 +11,8 @@ def wfr_euler_solve(
     cond: torch.Tensor,
     n_steps: int,
     dt: float,
-    clamp_g: float = 100.0
+    clamp_g: float = 100.0,
+    m_source: int = 1,
 ):
     """
     输入: z [B, D], cond [B, C]
@@ -19,7 +20,8 @@ def wfr_euler_solve(
     """
     B = z.shape[0]
     device = z.device
-    m = torch.ones((B, 1), device=device, dtype=z.dtype)
+    #m = torch.ones((B, 1), device=device, dtype=z.dtype)
+    m = torch.full((B, 1), m_source, device=device, dtype=z.dtype)
     
     for k in range(n_steps):
         t_val = k * dt
@@ -47,7 +49,8 @@ def run_batch_inference(
     source_rep: str = "X_pca_scaled",
     n_steps: int = 50,
     device: str = "cuda",
-    random_seed: int = 42
+    random_seed: int = 42,
+    m_source: int = 1,
 ) -> dict:
     """
     输出: 一个字典 {'TP53': {'z_pred': [n_particles, embed_len], 'm_pred': [n_particles, 1]}, ...}
@@ -70,7 +73,9 @@ def run_batch_inference(
         cond_vec = torch.tensor(subset.obsm[embedding_key][0], dtype=torch.float32, device=device)
         cond_batch = cond_vec.unsqueeze(0).expand(z0.shape[0], -1) # Broadcast
 
-        z_pred, m_pred = wfr_euler_solve(model, z0.clone(), cond_batch, n_steps, dt)
+
+        
+        z_pred, m_pred = wfr_euler_solve(model, z0.clone(), cond_batch, n_steps, dt, m_source=m_source)
 
         results[cond_name] = {
             'z_pred': z_pred.cpu().numpy(),

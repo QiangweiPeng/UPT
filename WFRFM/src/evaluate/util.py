@@ -288,6 +288,11 @@ def evaluate_all(
         device=device
     )
 
+    if "normalized_m" in adata_control.uns:
+        m_source = adata_control.uns["normalized_m"]
+    else:
+        m_source = 1
+
     # ---- inference ----
     results_embedding = run_batch_inference(
         model=model,
@@ -299,7 +304,8 @@ def evaluate_all(
         source_rep=sample_rep,
         n_steps=n_steps,
         device=device,
-        random_seed=random_seed
+        random_seed=random_seed,
+        m_source = m_source
     )
 
     # ---- reconstruct ----

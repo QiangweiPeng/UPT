@@ -120,8 +120,8 @@ def compute_xt_ut_gt(t_samp, x0, x1, mass0, mass1, delta):
 
     xt_samp = x0 + omega_vector * (inv_sqrt_Am0_m_Bsq * (torch.arctan((A*t_samp - B)*inv_sqrt_Am0_m_Bsq) - torch.arctan(-B*inv_sqrt_Am0_m_Bsq)))
 
-    # # add random noise
-    # xt_samp = xt_samp + torch.randn_like(xt_samp) * 5e-2
+    # add random noise
+    xt_samp = xt_samp + torch.randn_like(xt_samp) * 5e-2
 
     masst_samp = A*t_samp**2 - 2*B*t_samp + mass0  
     #中间质量同样应该非负
