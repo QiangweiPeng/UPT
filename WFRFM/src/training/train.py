@@ -21,6 +21,7 @@ def train_model(adata_control, adata_treated, adata_test,
                 sample_rep = "X_pca_scaled", # X_ae; X_state
                 condition_keys="target_gene",
                 condition_rep_keys = "gene_embeddings",
+                donor_rep_keys = None,
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                 save_path=None,
                 eval_interval = 10,
@@ -32,7 +33,8 @@ def train_model(adata_control, adata_treated, adata_test,
         adata_control, adata_treated, ot_results_train,
         sample_rep=sample_rep,
         condition_keys=condition_keys,
-        condition_rep_keys=condition_rep_keys
+        condition_rep_keys=condition_rep_keys,
+        donor_rep_keys = donor_rep_keys
     )
     test_loader = None
     if adata_test is not None and ot_results_test is not None:
@@ -40,7 +42,8 @@ def train_model(adata_control, adata_treated, adata_test,
             adata_control, adata_test, ot_results_test,
             sample_rep=sample_rep,
             condition_keys=condition_keys,
-            condition_rep_keys=condition_rep_keys
+            condition_rep_keys=condition_rep_keys,
+            donor_rep_keys = donor_rep_keys
         )
     
     progress_bar = tqdm(range(n_iterations), desc="Begin flow and growth matching...", unit="epoch")
@@ -50,7 +53,7 @@ def train_model(adata_control, adata_treated, adata_test,
     for i in progress_bar:
         model.train()
         optimizer.zero_grad()
-        t, xt, ut, gt, masst, cons = get_batch(
+        t, xt, ut, gt, masst, cons, donor = get_batch(
             helper=train_loader,
             batch_size_per_condition=batch_size_per_condition,
             batch_size_condition=batch_size_condition,
@@ -58,7 +61,7 @@ def train_model(adata_control, adata_treated, adata_test,
             device=device
         )
 
-        vt, gt_pred = model(t, xt, cons)
+        vt, gt_pred = model(t, xt, cons, donor)
 
         vloss = torch.mean((vt - ut)**2 * masst)
         vloss_list.append(vloss.item())
@@ -80,14 +83,14 @@ def train_model(adata_control, adata_treated, adata_test,
             model.eval()
             with torch.no_grad():
                 if test_loader is not None:
-                    t_test, xt_test, ut_test, gt_test, masst_test, cons_test = get_batch(
+                    t_test, xt_test, ut_test, gt_test, masst_test, cons_test, donor_test = get_batch(
                         helper=test_loader,
                         batch_size_per_condition=batch_size_per_condition,
                         batch_size_condition=batch_size_condition, 
                         delta=test_loader.delta,
                         device=device
                     )
-                    vt_test, gt_pred_test = model(t_test, xt_test, cons_test)
+                    vt_test, gt_pred_test = model(t_test, xt_test, cons_test, donor_test)
                     test_vloss = torch.mean((vt_test - ut_test)**2 * masst_test) 
                     test_vloss_list.append(test_vloss.item())
                     test_gloss = torch.mean((gt_pred_test - gt_test)**2 * masst_test)

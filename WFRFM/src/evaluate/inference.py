@@ -11,6 +11,7 @@ def wfr_euler_solve(
     cond: torch.Tensor,
     n_steps: int,
     dt: float,
+    donor: torch.Tensor | None = None,
     clamp_g: float = 100.0,
     m_source: int = 1,
 ):
@@ -27,7 +28,10 @@ def wfr_euler_solve(
         t_val = k * dt
         t = torch.full((B, 1), t_val, device=device, dtype=z.dtype)
 
-        v, g = model(t, z, cond)
+        if donor is not None:
+            v, g = model(t, z, cond, donor)
+        else:
+            v, g = model(t, z, cond)
         
         if g.dim() == 1: g = g.unsqueeze(1)
         g = g.clamp(-clamp_g, clamp_g)
@@ -44,6 +48,7 @@ def run_batch_inference(
     adata_source: torch.Tensor,       # 一般是adata_control #直接处理好放进来
     adata_conditions: ad.AnnData,   # adata_train or adata_test
     target_conditions: list,        # perturb什么gene
+    donor_source: torch.Tensor | None = None,
     condition_keys: str = "target_gene",
     embedding_key: str = "gene_embeddings",
     source_rep: str = "X_pca_scaled",
@@ -73,9 +78,8 @@ def run_batch_inference(
         cond_vec = torch.tensor(subset.obsm[embedding_key][0], dtype=torch.float32, device=device)
         cond_batch = cond_vec.unsqueeze(0).expand(z0.shape[0], -1) # Broadcast
 
-
         
-        z_pred, m_pred = wfr_euler_solve(model, z0.clone(), cond_batch, n_steps, dt, m_source=m_source)
+        z_pred, m_pred = wfr_euler_solve(model, z0.clone(), cond_batch, n_steps, dt, donor = donor_source, m_source=m_source)
 
         results[cond_name] = {
             'z_pred': z_pred.cpu().numpy(),
