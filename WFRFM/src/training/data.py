@@ -12,13 +12,19 @@ class DataLoaderHelper:
                  precomputed_results, 
                  sample_rep='X_pca_scaled',
                  condition_keys="target_gene",
-                 condition_rep_keys="gene_embeddings"):
+                 condition_rep_keys="gene_embeddings",
+                 donor_rep_keys = None):
         
         self.X_control = adata_control.obsm[sample_rep]
         self.X_treated_all = adata_treated.obsm[sample_rep]
 
         self.condition_emb_map = {}
         unique_cons = adata_treated.obs[condition_keys].unique()
+
+        self.donor_rep_keys = donor_rep_keys
+        if self.donor_rep_keys is not None:
+            self.donor_control = adata_control.obs[self.donor_rep_keys].values
+            self.donor_treated_all = adata_treated.obs[self.donor_rep_keys].values
         
         df = adata_treated.obs[[condition_keys]]
         for con in unique_cons:
@@ -120,8 +126,8 @@ def compute_xt_ut_gt(t_samp, x0, x1, mass0, mass1, delta):
 
     xt_samp = x0 + omega_vector * (inv_sqrt_Am0_m_Bsq * (torch.arctan((A*t_samp - B)*inv_sqrt_Am0_m_Bsq) - torch.arctan(-B*inv_sqrt_Am0_m_Bsq)))
 
-    # # add random noise
-    # xt_samp = xt_samp + torch.randn_like(xt_samp) * 5e-2
+    # add random noise
+    xt_samp = xt_samp + torch.randn_like(xt_samp) * 5e-2
 
     masst_samp = A*t_samp**2 - 2*B*t_samp + mass0  
     #中间质量同样应该非负
@@ -144,7 +150,7 @@ def get_batch(helper, #  DataLoaderHelper
     我们把adata在dataloader中预取 在get_batch中便可以对numpy切片
     """
 
-    ts, xts, uts, gts, massts, cons = [], [], [], [], [], []
+    ts, xts, uts, gts, massts, cons, donors = [], [], [], [], [], [], []
     
     sample_con_names = random.sample(helper.all_conditions, batch_size_condition)
     for cur_con in sample_con_names:
@@ -194,5 +200,12 @@ def get_batch(helper, #  DataLoaderHelper
         
         cons.append(cur_con_tensor)
 
+        if helper.donor_rep_keys is not None:
+            donor_np = helper.donor_control[idx_0] # 这里直接用control的donor 理论上如果后期混用
+            donor_np = donor_np[index.cpu().numpy()] 
+            donor_tensor = torch.from_numpy(donor_np).to(device).long()
+            donors.append(donor_tensor)
+
     return (torch.cat(ts), torch.cat(xts), torch.cat(uts), 
-            torch.cat(gts), torch.cat(massts), torch.cat(cons))
+            torch.cat(gts), torch.cat(massts), torch.cat(cons),
+            torch.cat(donors) if donors else None)

@@ -3,9 +3,9 @@ import torch.nn as nn
 import math
 
 class FiLMResBlock(nn.Module):
-    def __init__(self, dim, con_dim, time_dim,bottle_dim=512, activation=None, dropout=0):
+    def __init__(self, dim, con_dim, time_dim,bottle_dim=512, donor_emb_dim=None,activation=None, dropout=0):
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim, elementwise_affine=False) # 难道这里不能改成False？
+        self.norm1 = nn.LayerNorm(dim, elementwise_affine=False) 
        # self.norm2 = nn.LayerNorm(dim)
         
         self.fc1 = nn.Linear(dim, dim)
@@ -20,8 +20,16 @@ class FiLMResBlock(nn.Module):
         
         # self.film_gen_c = nn.Linear(con_dim, dim * 2) 
         # self.film_gen_t = nn.Linear(time_dim, dim * 2)
+
+        if donor_emb_dim is not None:
+            fuse_dim = con_dim + time_dim + donor_emb_dim
+        else:
+            fuse_dim = con_dim + time_dim
+        
         self.film_fuse = nn.Sequential(
-            nn.Linear(con_dim + time_dim, bottle_dim),
+            nn.Linear(fuse_dim, bottle_dim),
+            self.activation,
+            nn.Linear(bottle_dim,bottle_dim),
             self.activation,
             nn.Linear(bottle_dim, 2 * dim)
         )
@@ -30,7 +38,7 @@ class FiLMResBlock(nn.Module):
         nn.init.zeros_(self.film_fuse[-1].weight)
         nn.init.zeros_(self.film_fuse[-1].bias)
 
-    def forward(self, x, t_emb, c_emb):
+    def forward(self, x, c_emb, t_emb, d_emb=None):
         # x: [Batch, dim]
         # t_emb: [Batch, time_dim]
         # c_emb: [Batch, con_dim]
@@ -38,7 +46,11 @@ class FiLMResBlock(nn.Module):
         # params_c = self.film_gen_c(c_emb)
         # params_t = self.film_gen_t(t_emb)
         # film_params = params_c + params_t # 过一层linear然后相加
-        film_params = self.film_fuse(torch.cat([c_emb, t_emb], dim=-1))
+
+        if d_emb is not None:
+            film_params = self.film_fuse(torch.cat([c_emb, t_emb, d_emb], dim=-1))
+        else:
+            film_params = self.film_fuse(torch.cat([c_emb, t_emb],dim=-1))
         
         gammas, betas = film_params.chunk(2, dim=-1)
         
@@ -56,7 +68,7 @@ class FiLMResBlock(nn.Module):
 
 
 class Velocity_GrowthNet(nn.Module):
-    def __init__(self, in_dim, out_dim, con_embedding_dim, time_dim, hidden_dim, n_hiddens, bottle_dim, activation=None):
+    def __init__(self, in_dim, out_dim, con_embedding_dim, time_dim,donor_emb_dim, hidden_dim, n_hiddens, bottle_dim, activation=None):
         super().__init__()
 
         if(activation=="GELU"):
@@ -67,17 +79,20 @@ class Velocity_GrowthNet(nn.Module):
         self.fc_in = nn.Linear(in_dim, hidden_dim)
         
         self.blocks = nn.ModuleList([
-            FiLMResBlock(hidden_dim, con_embedding_dim, time_dim,bottle_dim, activation=activation) for _ in range(n_hiddens)
+            FiLMResBlock(hidden_dim, con_embedding_dim, time_dim,bottle_dim=bottle_dim, donor_emb_dim = donor_emb_dim, activation=activation) for _ in range(n_hiddens)
         ])
         
         self.fc_out = nn.Linear(hidden_dim, out_dim)
 
-    def forward(self, t, x, c):
+    def forward(self, x, c, t_emb, d_emb=None):
         
         h = self.fc_in(x)
         
         for block in self.blocks:
-            h = block(h, t, c) 
+            if d_emb is not None:
+                h = block(h, c, t_emb, d_emb) 
+            else:
+                h = block(h, c, t_emb)
             
         return self.fc_out(h)
 
@@ -104,7 +119,7 @@ class FNet(nn.Module):
     def __init__(self, in_out_dim, hidden_dim_v=4096, n_hiddens_v=4, hidden_dim_g=2048, n_hiddens_g=2,
                  condition_dim=1280, con_embedding_dim=512, hidden_dim_con=1024, 
                  time_dim=1024,time_embedding_dim=256, hidden_dim_time=512, 
-                 bottle_dim=512, activation='GELU'):
+                 bottle_dim=512, num_donor=1, donor_emb_dim=128,contain_donor=False, activation='GELU'):
         super().__init__()
         
         self.time_dim = time_dim
@@ -128,6 +143,15 @@ class FNet(nn.Module):
             self.activation,
             nn.Linear(hidden_dim_con, con_embedding_dim)
         )
+
+        
+        if contain_donor:
+            self.donor_encoder = nn.Embedding(num_donor, donor_emb_dim)
+            self.donor_emb_dim = donor_emb_dim
+        else:
+            self.donor_encoder = None
+            self.donor_emb_dim = None
+        
         self.time_encoder = nn.Sequential(
             nn.Linear(time_dim,hidden_dim_time),
             self.activation,
@@ -135,23 +159,28 @@ class FNet(nn.Module):
         )
         
         self.v_net = Velocity_GrowthNet(
-            in_out_dim, in_out_dim, self.con_embedding_dim, self.time_embedding_dim, 
+            in_out_dim, in_out_dim, self.con_embedding_dim, self.time_embedding_dim, self.donor_emb_dim,
             hidden_dim=hidden_dim_v, n_hiddens=n_hiddens_v,
             bottle_dim=bottle_dim, activation = activation
         )
         
         self.g_net = Velocity_GrowthNet(
-            in_out_dim, 1, self.con_embedding_dim, self.time_embedding_dim, 
+            in_out_dim, 1, self.con_embedding_dim, self.time_embedding_dim, self.donor_emb_dim,
             hidden_dim=hidden_dim_g, n_hiddens=n_hiddens_g,
             bottle_dim=bottle_dim, activation = activation
         )
 
-    def forward(self, t, z, con):
+    def forward(self, t, z, con, donor = None):
         c = self.condition_encoder(con)
-        t_embed = self.t_encoder(t)
-        t_embed = self.time_encoder(t_embed)
-        
-        v = self.v_net(t_embed, z, c)
-        g = self.g_net(t_embed, z, c)
+        t_emb = self.t_encoder(t)
+        t_emb = self.time_encoder(t_emb)
+
+        if self.donor_encoder is not None:
+            d_emb = self.donor_encoder(donor)
+            v = self.v_net(z, c, t_emb, d_emb=d_emb)
+            g = self.g_net(z, c, t_emb, d_emb=d_emb)
+        else:
+            v = self.v_net(z, c, t_emb, d_emb=None)
+            g = self.g_net(z, c, t_emb, d_emb=None)
 
         return v, g

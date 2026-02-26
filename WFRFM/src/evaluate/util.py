@@ -243,6 +243,7 @@ def evaluate_all(
     condition_keys,
     control_key,
     condition_rep_keys,
+    donor_rep_keys,
     sample_rep,
     device,
     results_save_path,
@@ -287,6 +288,16 @@ def evaluate_all(
         dtype=torch.float32,
         device=device
     )
+    
+    donor_source = None
+    if donor_rep_keys is not None and donor_rep_keys in adata_control.obs:
+        donor_np = adata_control.obs[donor_rep_keys].values[indices]
+        donor_source = torch.tensor(donor_np, dtype=torch.long, device=device)
+
+    if "normalized_m" in adata_control.uns:
+        m_source = adata_control.uns["normalized_m"]
+    else:
+        m_source = 1
 
     # ---- inference ----
     results_embedding = run_batch_inference(
@@ -294,12 +305,14 @@ def evaluate_all(
         adata_source=adata_source,
         adata_conditions=adata_test,
         target_conditions=target_genes,
+        donor_source=donor_source,
         condition_keys=condition_keys,
         embedding_key=condition_rep_keys,
         source_rep=sample_rep,
         n_steps=n_steps,
         device=device,
-        random_seed=random_seed
+        random_seed=random_seed,
+        m_source = m_source
     )
 
     # ---- reconstruct ----

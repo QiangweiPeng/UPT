@@ -2,6 +2,7 @@ WFRFM/data/*
 WFRFM/experiments/*
 WFRFM/results/*
 WFRFM/*.pkl
+WFRFM/figures
 
 !WFRFM/data/raw/
 WFRFM/data/raw/*
