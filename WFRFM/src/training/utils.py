@@ -124,6 +124,7 @@ def pre_compute_wfr_ot(adata_control,
                        save_path, 
                        sample_rep='X_pca_scaled', 
                        condition_keys="target_gene",
+                       donor_rep_keys=None,
                        delta=1,
                        reg_m=1,
                        use_mini_batch_uot=True, 
@@ -133,6 +134,7 @@ def pre_compute_wfr_ot(adata_control,
     """
     让ai写了一个断点重连逻辑
     另外把result中储存方式改成了字典
+    新增donor_rep_keys字段
     """
 
 
