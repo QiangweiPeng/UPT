@@ -70,6 +70,7 @@ def process_to_embedding(adata_control, adata_train,
             project_pca(adata_control, ref_adata = adata_ref, obsm_key_added="X_pca")
             adata_control.obsm["X_pca_scaled"] = adata_control.obsm["X_pca"] / np.sqrt(var)
             print(np.std(np.array(adata_control.obsm[sample_rep + "_scaled"]), axis=0))
+            del adata_control.obsm['X_pca']
             
             adata_control.uns["pca"] = adata_ref.uns["pca"].copy()
             adata_control.varm["PCs"] = adata_ref.varm["PCs"].copy()
@@ -78,11 +79,13 @@ def process_to_embedding(adata_control, adata_train,
             project_pca(adata_train, ref_adata = adata_ref, obsm_key_added="X_pca")
             adata_train.obsm["X_pca_scaled"] = adata_train.obsm["X_pca"] / np.sqrt(var)
             print(np.std(np.array(adata_train.obsm[sample_rep + "_scaled"]), axis=0))
+            del adata_train.obsm['X_pca']
 
             if adata_test is not None:
                 project_pca(adata_test, ref_adata = adata_ref, obsm_key_added="X_pca")
                 adata_test.obsm["X_pca_scaled"] = adata_test.obsm["X_pca"] / np.sqrt(var)
                 print(np.std(np.array(adata_test.obsm[sample_rep + "_scaled"]), axis=0))
+                del adata_test.obsm['X_pca']
 
         else:
             
@@ -100,15 +103,18 @@ def process_to_embedding(adata_control, adata_train,
             adata_control.obsm[sample_rep] = adata_combined.obsm["X_pca"][:n_c]
             adata_control.obsm[sample_rep+"_scaled"] = adata_control.obsm[sample_rep] / np.sqrt(var)
             print(np.std(np.array(adata_control.obsm[sample_rep + "_scaled"]), axis=0))
+            del adata_control.obsm['X_pca']
     
             adata_train.obsm[sample_rep] = adata_combined.obsm["X_pca"][n_c:]
             adata_train.obsm[sample_rep+"_scaled"] = adata_train.obsm[sample_rep] / np.sqrt(var)
             print(np.std(np.array(adata_train.obsm[sample_rep + "_scaled"]), axis=0))
+            del adata_train.obsm['X_pca']
     
             if adata_test is not None:
                 project_pca(adata_test, ref_adata = adata_combined, obsm_key_added="X_pca")
                 adata_test.obsm[sample_rep+"_scaled"] = adata_test.obsm[sample_rep] / np.sqrt(var)
                 print(np.std(np.array(adata_test.obsm[sample_rep + "_scaled"]), axis=0))
+                del adata_test.obsm['X_pca']
             del adata_combined
 
     elif sample_rep == "X_scVI":

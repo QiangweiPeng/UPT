@@ -14,7 +14,7 @@ import random
 def compute_uot_plan_gpu(X_source, X_target,m_source=1,m_target=1, delta=1, reg_m=1, use_mini_batch_uot=False, group_number=5,draw=False):
     """
     如果数据量大了cpu跑不动 需要gpu版本
-    mini_batch代实现
+    mini_batch已实现
     """
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -25,64 +25,95 @@ def compute_uot_plan_gpu(X_source, X_target,m_source=1,m_target=1, delta=1, reg_
             X_target = torch.from_numpy(X_target).float().to(device)
 
         n_source, n_target = X_source.shape[0], X_target.shape[0]
-        norm_2_dist = ot.dist(X_source, X_target, metric='euclidean')
 
-        limit = torch.tensor(np.pi/2, device=device)
-        term = torch.clamp(norm_2_dist / (2 * delta), max=limit)
-        cos_sq = torch.cos(term)**2
-        
-        del norm_2_dist 
-        
-        epsilon = torch.tensor(1e-10, device=device)
-        cost_matrix = -torch.log(torch.where(cos_sq == 0, epsilon, cos_sq))
+        def get_cost_batch(xs, xt):
+            dist = torch.cdist(xs, xt, p=2) 
+            
+            limit = torch.tensor(np.pi/2, device=device)
+            term = torch.clamp(dist / (2 * delta), max=limit)
+            cos_sq = torch.cos(term)**2
+            
+            epsilon = torch.tensor(1e-10, device=device)
+            c_mat = -torch.log(torch.where(cos_sq == 0, epsilon, cos_sq))
+            return c_mat
 
+        a = torch.full((n_source,), m_source, device=device, dtype=torch.float)
+        b = torch.full((n_target,), m_target, device=device, dtype=torch.float)
+        
         if not use_mini_batch_uot:
-            a = torch.full((n_source,), m_source, device=device, dtype=torch.float)
-            b = torch.full((n_target,), m_target, device=device, dtype=torch.float)
+            cost_matrix = get_cost_batch(X_source, X_target)
             G = ot.unbalanced.mm_unbalanced(a, b, cost_matrix, reg_m=reg_m, numItermax=1000)
+            res_G = G.cpu().numpy()
+            del cost_matrix, G
         else:
-            pass
-            # 后面再写
-        
-        sum_1 = G.sum(1, keepdim=True)
-        sum_1 = torch.where(sum_1 == 0, torch.tensor(1.0, device=device), sum_1)
-        
-        sum_0 = G.sum(0, keepdim=True)
-        sum_0 = torch.where(sum_0 == 0, torch.tensor(1.0, device=device), sum_0)
+            res_G = np.zeros((n_source, n_target), dtype=np.float32) #直接放cpu上
+    
+            source_perm = torch.randperm(n_source, device=device)
+            target_perm = torch.randperm(n_target, device=device)
+    
+            source_indices = torch.tensor_split(source_perm, group_number)
+            target_indices = torch.tensor_split(target_perm, group_number)
+    
+            for src_idx, tgt_idx in zip(source_indices, target_indices): #只算对角
+                
+                sub_a = a[src_idx]
+                sub_b = b[tgt_idx]
+                
+                sub_x_s = X_source[src_idx]
+                sub_x_t = X_target[tgt_idx]
+                sub_cost_matrix = get_cost_batch(sub_x_s, sub_x_t) 
+                
+                G_sub = ot.unbalanced.mm_unbalanced(
+                    sub_a, sub_b, sub_cost_matrix, 
+                    reg_m=reg_m,     
+                    numItermax=1000
+                )
 
-        gamma0_plan = (a.view(-1, 1) / sum_1) * G
-        gamma1_plan = (b.view(1, -1) / sum_0) * G
+                src_idx_cpu = src_idx.cpu().numpy()
+                tgt_idx_cpu = tgt_idx.cpu().numpy()
+                res_G[np.ix_(src_idx_cpu, tgt_idx_cpu)] = G_sub.cpu().numpy()
+                del sub_cost_matrix, G_sub, sub_x_s, sub_x_t
+
+        a_np = np.full((n_source,), m_source, dtype=np.float32)
+        b_np = np.full((n_target,), m_target, dtype=np.float32)
+    
+        sum_1 = res_G.sum(axis=1, keepdims=True) 
+        sum_0 = res_G.sum(axis=0, keepdims=True) 
+    
+        sum_1[sum_1 == 0] = 1.0
+        sum_0[sum_0 == 0] = 1.0
+    
+        res_g0 = (a_np.reshape(-1, 1) / sum_1) * res_G
+        res_g1 = (b_np.reshape(1, -1) / sum_0) * res_G
 
 
         if draw:
-            import matplotlib.pyplot as plt
-
-            source_pred = G.sum(1)          # (n_source,)
-            target_pred = G.sum(0)          # (n_target,)
-            a_np = a.detach().cpu().numpy()
-            b_np = b.detach().cpu().numpy()
-            sum1_np = sum_1.squeeze(1).detach().cpu().numpy()  # (n_source,)
-            sum0_np = sum_0.squeeze(0).detach().cpu().numpy()  # (n_target,)
-
+            source_pred = res_G.sum(axis=1)  # (n_source,)
+            target_pred = res_G.sum(axis=0)  # (n_target,)
+            
+            sum1_flat = sum_1.squeeze(1)
+            sum0_flat = sum_0.squeeze(0)
+    
             fig = plt.figure(figsize=(15, 5))
+            
+            # 绘制 Source 侧
             plt.subplot(121)
-            plt.plot(a_np, label='1')
-            plt.plot(sum1_np, label='sum_i_give')
+            plt.plot(a_np, label='Target (m_source)', color='blue', alpha=0.6)
+            plt.plot(sum1_flat, label='Pred (sum_i_give)', color='orange', alpha=0.6, linestyle='--')
+            plt.title(f"Source Marginals (MSE: {np.mean((a_np - sum1_flat)**2):.4f})")
             plt.legend()
         
+            # 绘制 Target 侧
             plt.subplot(122)
-            plt.plot(b_np, label='1')
-            plt.plot(sum0_np, label='sum_j_receive')
+            plt.plot(b_np, label='Target (m_target)', color='blue', alpha=0.6)
+            plt.plot(sum0_flat, label='Pred (sum_j_receive)', color='orange', alpha=0.6, linestyle='--')
+            plt.title(f"Target Marginals (MSE: {np.mean((b_np - sum0_flat)**2):.4f})")
             plt.legend()
-
+    
             plt.show()
-        
+    
 
-        res_G = G.cpu().numpy()
-        res_g0 = gamma0_plan.cpu().numpy()
-        res_g1 = gamma1_plan.cpu().numpy()
-
-    del X_source, X_target, cost_matrix, G, gamma0_plan, gamma1_plan
+    del X_source, X_target
     torch.cuda.empty_cache()
 
     return res_G, res_g0, res_g1
