@@ -51,32 +51,37 @@ def draw_loss(load_path = None,eval_interval = 10,cut = 0,save_path = None):
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.legend()
 
-    # length = len(test_loss_list)
-    # test_loss_new = np.full(eval_interval * length, np.nan)
-    # test_loss_new[eval_interval-1::eval_interval] = test_loss_list
-    # test_loss_list = test_loss_new
-    
-    # test_loss_new = np.full(eval_interval * length, np.nan)
-    # test_loss_new[eval_interval-1::eval_interval] = test_vloss_list
-    # test_vloss_list = test_loss_new
+    #plt.tight_layout()
 
-    # test_loss_new = np.full(eval_interval * length, np.nan)
-    # test_loss_new[eval_interval-1::eval_interval] = test_gloss_list
-    # test_gloss_list = test_loss_new
+    file_name = os.path.basename(load_path).replace(".pt","")
+    if save_path is not None:
+        save_root = os.path.join(save_path,f"loss_{file_name}_all.png")
+        plt.savefig(save_root, dpi=300, bbox_inches="tight")
     
-    # test vloss
-    plt.figure(figsize=(7, 5))
-    plt.plot(test_vloss_list, label='Test vLoss', color='blue', alpha=0.6)
-    plt.title('Test vLoss')
+    # gloss
+    plt.figure(figsize=(15, 5))
+    plt.subplot(1, 2, 1)
+    plt.plot(gloss_list, label='Train gLoss', color='green', alpha=0.6)
+    #plt.plot(test_gloss_list, label='Test gLoss', color='blue', alpha=0.6)
+    plt.title('gLoss')
+    plt.xlabel('Iteration')
+    plt.ylabel('Loss')
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    #plt.plot(gloss_list, label='Train gLoss', color='green', alpha=0.6)
+    plt.plot(test_gloss_list, label='Test gLoss', color='blue', alpha=0.6)
+    plt.title('gLoss')
     plt.xlabel('Iteration')
     plt.ylabel('Loss')
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.legend()
     
-    plt.tight_layout()
-    file_name = os.path.basename(load_path).replace(".pt","")
+    #plt.tight_layout()
+
     if save_path is not None:
-        save_root = os.path.join(save_path,f"loss_{file_name}_.png")
+        save_root = os.path.join(save_path,f"loss_{file_name}_gloss.png")
         plt.savefig(save_root, dpi=300, bbox_inches="tight")
     plt.show()
 
