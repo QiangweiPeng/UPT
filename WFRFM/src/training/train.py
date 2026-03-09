@@ -23,7 +23,9 @@ def train_model(adata_control, adata_treated, adata_test,
                 condition_rep_keys = "gene_embeddings",
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                 save_path=None,
-                eval_interval = 10):
+                eval_interval = 10,
+                save_interval = 5000,
+                save_only_last = False):
     
     
     train_loader = DataLoaderHelper(
@@ -80,8 +82,8 @@ def train_model(adata_control, adata_treated, adata_test,
                 if test_loader is not None:
                     t_test, xt_test, ut_test, gt_test, masst_test, cons_test = get_batch(
                         helper=test_loader,
-                        batch_size_per_condition=batch_size_per_condition,
-                        batch_size_condition=batch_size_condition, 
+                        batch_size_per_condition=64,
+                        batch_size_condition=7, 
                         delta=test_loader.delta,
                         device=device
                     )
@@ -107,6 +109,7 @@ def train_model(adata_control, adata_treated, adata_test,
                 torch.save({
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(), 
                     'vloss_list': vloss_list,
                     'gloss_list': gloss_list,
                     'loss_list': loss_list,
@@ -116,7 +119,7 @@ def train_model(adata_control, adata_treated, adata_test,
                 }, ckpt_path)
                 logging.info(f"Model and training state saved to {ckpt_path}")
 
-                if last_ckpt_path is not None and os.path.isfile(last_ckpt_path):
+                if last_ckpt_path is not None and os.path.isfile(last_ckpt_path) and save_only_last:
                     try:
                         os.remove(last_ckpt_path)
                     except OSError:
