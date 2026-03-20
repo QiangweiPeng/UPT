@@ -21,8 +21,8 @@ def wfr_euler_solve(
     """
     B = z.shape[0]
     device = z.device
-    #m = torch.ones((B, 1), device=device, dtype=z.dtype)
-    m = torch.full((B, 1), m_source, device=device, dtype=z.dtype)
+    m = torch.ones((B, 1), device=device, dtype=z.dtype)
+    #m = torch.full((B, 1), m_source, device=device, dtype=z.dtype)
     
     for k in range(n_steps):
         t_val = k * dt
@@ -113,7 +113,8 @@ def batch_reconstruct_pca(
     for cond_name, result_dict in tqdm(inference_results.items()):
         z_pca_scaled = result_dict['z_pred']
         m_pred = result_dict['m_pred'] 
-        z_pca = z_pca_scaled * scale_factor
+        # z_pca = z_pca_scaled * scale_factor
+        z_pca = result_dict['z_pred']
         X_recon = np.dot(z_pca, PCs.T) + mean
         
         if store_as_anndata:

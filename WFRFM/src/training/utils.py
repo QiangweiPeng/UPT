@@ -88,6 +88,7 @@ def compute_uot_plan_gpu(X_source, X_target,m_source=1,m_target=1, delta=1, reg_
 
 
         if draw:
+            import matplotlib.pyplot as plt
             source_pred = res_G.sum(axis=1)  # (n_source,)
             target_pred = res_G.sum(axis=0)  # (n_target,)
             
@@ -151,7 +152,6 @@ def pre_compute_wfr_ot(adata_control,
     X_control = adata_control.obsm[sample_rep]
     control_obs_names = adata_control.obs_names.to_numpy()
     all_conditions = adata_treated.obs[condition_keys].unique().tolist()
-    threshold = 1e-6
 
     grouped_indices = adata_treated.obs.groupby(condition_keys).indices 
     X_treated_all = adata_treated.obsm[sample_rep] 
@@ -203,6 +203,8 @@ def pre_compute_wfr_ot(adata_control,
                 g0 = g0.cpu().numpy()
                 g1 = g1.cpu().numpy()
                 torch.cuda.empty_cache()
+
+            threshold = max(1e-4, 10 / X_treat_cur.shape[0])
             
             batch_results["uot_plans"][cur_condition] = sparse.csr_matrix(gamma * (gamma >= threshold))
             batch_results["gamma0_plans"][cur_condition] = sparse.csr_matrix(g0 * (g0 >= threshold))

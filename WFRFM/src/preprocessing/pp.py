@@ -68,24 +68,28 @@ def process_to_embedding(adata_control, adata_train,
             var = np.asarray(adata_ref.uns["pca"]["variance"])
 
             project_pca(adata_control, ref_adata = adata_ref, obsm_key_added="X_pca")
-            adata_control.obsm["X_pca_scaled"] = adata_control.obsm["X_pca"] / np.sqrt(var)
-            print(np.std(np.array(adata_control.obsm[sample_rep + "_scaled"]), axis=0))
-            del adata_control.obsm['X_pca']
+            # adata_control.obsm["X_pca_scaled"] = adata_control.obsm["X_pca"] / np.sqrt(var)
+            # print(np.std(np.array(adata_control.obsm[sample_rep + "_scaled"]), axis=0))
+            # del adata_control.obsm['X_pca']
+            print(np.std(np.array(adata_control.obsm[sample_rep]), axis=0))
             
             adata_control.uns["pca"] = adata_ref.uns["pca"].copy()
             adata_control.varm["PCs"] = adata_ref.varm["PCs"].copy()
             adata_control.varm["X_mean"] = adata_ref.varm["X_mean"].copy()
             
             project_pca(adata_train, ref_adata = adata_ref, obsm_key_added="X_pca")
-            adata_train.obsm["X_pca_scaled"] = adata_train.obsm["X_pca"] / np.sqrt(var)
-            print(np.std(np.array(adata_train.obsm[sample_rep + "_scaled"]), axis=0))
-            del adata_train.obsm['X_pca']
+            # adata_train.obsm["X_pca_scaled"] = adata_train.obsm["X_pca"] / np.sqrt(var)
+            # print(np.std(np.array(adata_train.obsm[sample_rep + "_scaled"]), axis=0))
+            # del adata_train.obsm['X_pca']
+            print(np.std(np.array(adata_train.obsm[sample_rep]), axis=0))
+            
 
             if adata_test is not None:
                 project_pca(adata_test, ref_adata = adata_ref, obsm_key_added="X_pca")
-                adata_test.obsm["X_pca_scaled"] = adata_test.obsm["X_pca"] / np.sqrt(var)
-                print(np.std(np.array(adata_test.obsm[sample_rep + "_scaled"]), axis=0))
-                del adata_test.obsm['X_pca']
+                # adata_test.obsm["X_pca_scaled"] = adata_test.obsm["X_pca"] / np.sqrt(var)
+                # print(np.std(np.array(adata_test.obsm[sample_rep + "_scaled"]), axis=0))
+                # del adata_test.obsm['X_pca']
+                print(np.std(np.array(adata_test.obsm[sample_rep]), axis=0))
 
         else:
             
@@ -101,20 +105,23 @@ def process_to_embedding(adata_control, adata_train,
     
             n_c = adata_control.n_obs
             adata_control.obsm[sample_rep] = adata_combined.obsm["X_pca"][:n_c]
-            adata_control.obsm[sample_rep+"_scaled"] = adata_control.obsm[sample_rep] / np.sqrt(var)
-            print(np.std(np.array(adata_control.obsm[sample_rep + "_scaled"]), axis=0))
-            del adata_control.obsm['X_pca']
+            # adata_control.obsm[sample_rep+"_scaled"] = adata_control.obsm[sample_rep] / np.sqrt(var)
+            # print(np.std(np.array(adata_control.obsm[sample_rep + "_scaled"]), axis=0))
+            # del adata_control.obsm['X_pca']
+            print(np.std(np.array(adata_control.obsm[sample_rep]), axis=0))
     
             adata_train.obsm[sample_rep] = adata_combined.obsm["X_pca"][n_c:]
-            adata_train.obsm[sample_rep+"_scaled"] = adata_train.obsm[sample_rep] / np.sqrt(var)
-            print(np.std(np.array(adata_train.obsm[sample_rep + "_scaled"]), axis=0))
-            del adata_train.obsm['X_pca']
+            # adata_train.obsm[sample_rep+"_scaled"] = adata_train.obsm[sample_rep] / np.sqrt(var)
+            # print(np.std(np.array(adata_train.obsm[sample_rep + "_scaled"]), axis=0))
+            # del adata_train.obsm['X_pca']
+            print(np.std(np.array(adata_train.obsm[sample_rep]), axis=0))
     
             if adata_test is not None:
                 project_pca(adata_test, ref_adata = adata_combined, obsm_key_added="X_pca")
-                adata_test.obsm[sample_rep+"_scaled"] = adata_test.obsm[sample_rep] / np.sqrt(var)
-                print(np.std(np.array(adata_test.obsm[sample_rep + "_scaled"]), axis=0))
-                del adata_test.obsm['X_pca']
+                # adata_test.obsm[sample_rep+"_scaled"] = adata_test.obsm[sample_rep] / np.sqrt(var)
+                # print(np.std(np.array(adata_test.obsm[sample_rep + "_scaled"]), axis=0))
+                # del adata_test.obsm['X_pca']
+                print(np.std(np.array(adata_test.obsm[sample_rep]), axis=0))
             del adata_combined
 
     elif sample_rep == "X_scVI":
@@ -136,11 +143,11 @@ def process_to_embedding(adata_control, adata_train,
                 gene_likelihood="nb",
             )
             model_ref.train(
-                max_epochs=500,        
+                max_epochs=50,        
                 early_stopping=True,  
-                early_stopping_patience=50, 
+                early_stopping_patience=20, 
                 check_val_every_n_epoch=5,
-                plan_kwargs={"lr": 1e-4}
+                plan_kwargs={"lr": 5e-4}
             )
             model_ref.save(f"{model_save_path}_ref", overwrite=True)
             
@@ -167,7 +174,7 @@ def process_to_embedding(adata_control, adata_train,
                     adata_test, 
                     model_ref
                 )
-                model_test.train(max_epochs=100, plan_kwargs=dict(weight_decay=0.0))
+                model_test.train(max_epochs=10, plan_kwargs=dict(weight_decay=0.0))
                 model_test.save(f"{model_save_path}_test", overwrite=True)
             adata_test.obsm[sample_rep] = model_test.get_latent_representation()
             
@@ -193,7 +200,7 @@ def process_to_embedding(adata_control, adata_train,
         else:
             flatvi_model.train_model(
                 adata_combined,
-                max_epochs=150,
+                max_epochs=5,
                 batch_size=256,
                 save_path=model_save_path 
             )
@@ -226,6 +233,10 @@ def process_to_embedding(adata_control, adata_train,
         
 
     if condition_rep_dict is not None: 
+        adata_train.obs[condition_keys] = adata_train.obs[condition_keys].astype(str).str.strip()
+        if adata_test is not None:
+            adata_test.obs[condition_keys] = adata_test.obs[condition_keys].astype(str).str.strip()
+            
         unique_keys = set(adata_train.obs[condition_keys].unique())
         if adata_test is not None:
             unique_keys.update(adata_test.obs[condition_keys].unique())

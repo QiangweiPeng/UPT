@@ -167,6 +167,12 @@ def evaluate_population_average(
     X_ctrl = adata_to_numpy(adata_control)
     mean_ctrl = np.nanmean(X_ctrl, axis=0)
     
+    if "normalized_m" in adata_control.uns:
+        m_source = adata_control.uns["normalized_m"]
+    else:
+        m_source = 1
+    m_ctrl_sum = adata_control.n_obs * m_source
+    
     # true_emb_ctrl = get_embedding(adata_control, embedding_key)
     # ctrl_mean_latent = np.nanmean(true_emb_ctrl, axis=0)
 
@@ -181,12 +187,21 @@ def evaluate_population_average(
             print(f"{pert} no observation")
             continue
         X_true = adata_to_numpy(adata_true_pert)
+
+        if "normalized_m" in adata_treated.uns:
+            m_target = adata_treated.uns["normalized_m"]
+        else:
+            m_target = 1
+        m_true_sum = adata_true_pert.n_obs * m_target
+        m_true_change = m_true_sum / m_ctrl_sum
         
         adata_pred_pert = results_genes[pert]
         X_pred = adata_to_numpy(adata_pred_pert)
         m_pred = adata_pred_pert.obs['mass']
         m_pred = np.asarray(m_pred)
-        m_pred = m_pred / m_pred.sum()
+        m_pred_sum = m_pred.sum()
+        m_pred_change = m_pred_sum / (adata_pred_pert.n_obs * m_source)
+        m_pred = m_pred / m_pred_sum
         
         mean_true = np.nanmean(X_true, axis=0)
         mean_pred = np.average(X_pred, axis=0, weights = m_pred) # 根据 m_pred 加权
@@ -256,6 +271,10 @@ def evaluate_population_average(
             spearman_delta, _ = spearmanr(delta_true, delta_pred)
         row['pcc_delta'] = pcc_delta
         row['spearman_delta'] = spearman_delta
+
+        # mass change
+        row['m_true_change'] = m_true_change
+        row['m_pred_change'] = m_pred_change
 
         metrics_list.append(row)
 

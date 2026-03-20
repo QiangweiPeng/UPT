@@ -327,13 +327,13 @@ def evaluate_all(
     model_test = None
 
     # 我们可以reconstruct出原始基因表达
-    if sample_rep == "X_pca_scaled":
+    if sample_rep in ["X_pca_scaled","X_pca"]:
         results_genes = batch_reconstruct_pca(
             inference_results=results_embedding,  
             ref_adata=adata_control        
         )
     elif sample_rep in ["X_scVI"]:
-        batch_data = adata_control.obs['_scvi_batch'].values[indices]
+        # batch_data = adata_control.obs['_scvi_batch'].values[indices]
         model_ref = scvi.model.SCVI.load(f"{scvi_model_load_path}_ref", adata=adata_control)
         model_train = scvi.model.SCVI.load(f"{scvi_model_load_path}_train", adata=adata_control)
         model_test = scvi.model.SCVI.load(f"{scvi_model_load_path}_test", adata=adata_control)
