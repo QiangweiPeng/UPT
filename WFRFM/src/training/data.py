@@ -3,45 +3,74 @@ import random
 import numpy as np
 from scipy import sparse  
 
+
 class DataLoaderHelper:
     """
     这是一个辅助类，用来存储训练所需的静态数据
-    避免在 get_batch 循环里反复查找 adata
+    支持多维协变量切片下的 Control 和 Treated 动态匹配
     """
     def __init__(self, adata_control, adata_treated, 
-                 precomputed_results, 
+                 precomputed_results, cov_config ={},
                  sample_rep='X_pca_scaled',
-                 condition_keys="target_gene",
-                 condition_rep_keys="gene_embeddings",
-                 donor_rep_keys = None):
+                 condition_rep_keys="gene_embeddings"):
         
-        self.X_control = adata_control.obsm[sample_rep]
+        # 1. 存储全局矩阵
+        self.X_control_all = adata_control.obsm[sample_rep]
         self.X_treated_all = adata_treated.obsm[sample_rep]
 
-        self.condition_emb_map = {}
-        unique_cons = adata_treated.obs[condition_keys].unique()
+        # 2. 建立 obs_names 到 全局 integer index 的哈希映射，用于极速查找
+        control_obs_to_idx = {name: i for i, name in enumerate(adata_control.obs_names)}
+        treated_obs_to_idx = {name: i for i, name in enumerate(adata_treated.obs_names)}
 
-        self.donor_rep_keys = donor_rep_keys
-        if self.donor_rep_keys is not None:
-            self.donor_control = adata_control.obs[self.donor_rep_keys].values
-            self.donor_treated_all = adata_treated.obs[self.donor_rep_keys].values
-        
-        df = adata_treated.obs[[condition_keys]]
-        for con in unique_cons:
-            idx = np.where(adata_treated.obs[condition_keys] == con)[0][0]
-            self.condition_emb_map[con] = adata_treated.obsm[condition_rep_keys][idx]
-            
-
-        self.treated_indices_map = adata_treated.obs.groupby(condition_keys).indices
-
-        # utils里改成了字典
         self.gamma0_plans = precomputed_results["gamma0_plans"]
         self.gamma1_plans = precomputed_results["gamma1_plans"]
         self.delta = precomputed_results["delta"]
-        
         self.all_conditions = list(self.gamma0_plans.keys())
         
+        # 3. 解析供每个 condition 使用的具体切片索引
+        self.control_indices_dict = {}
+        self.treated_indices_dict = {}
+        self.condition_emb_map = {}
+        
+        
+        print("正在构建局部到全局的索引映射...")
+        for con in self.all_conditions:
+            # 取出当前 condition 对应的细胞名
+            c_names = precomputed_results["control_obs_names"][con]
+            t_names = precomputed_results["treat_obs_names"][con]
+            
+            # 转化为全局整数索引并缓存
+            c_indices = np.array([control_obs_to_idx[name] for name in c_names])
+            t_indices = np.array([treated_obs_to_idx[name] for name in t_names])
+            
+            self.control_indices_dict[con] = c_indices
+            self.treated_indices_dict[con] = t_indices
+            
+            # 动态获取 condition embedding：
+            # 既然 t_indices 里的细胞都属于这个 condition，我们直接拿第一个细胞的 embedding 即可
+            first_t_idx = t_indices[0]
+            self.condition_emb_map[con] = adata_treated.obsm[condition_rep_keys][first_t_idx]
+
+               
+        self.cov_control_dict = {}
+        if cov_config is not None:
+            for key, config in cov_config.items():
+                if config.get('use_in_model', True):
+                    # 获取该协变量列
+                    col_data = adata_control.obs[key]
+                    
+                    if col_data.dtype.name == 'category' or col_data.dtype == object:
+                        # 如果是离散类别（Categorical），提取其内部的整数编码，并转为 int64
+                        # 深度学习模型中的 Embedding 层需要 long/int64 类型的输入
+                        self.cov_control_dict[key] = col_data.cat.codes.to_numpy(dtype=np.int64)
+                    else:
+                        # 如果是连续数值（例如 dose），转为标准的 float32 numpy 数组
+                        self.cov_control_dict[key] = col_data.to_numpy(dtype=np.float32)
+
+
+
         print("data_loaded")
+
 
 
 def sample_from_ot_plan(ot_plan, x0, x1, batch_size = 256):
@@ -141,28 +170,35 @@ def compute_xt_ut_gt(t_samp, x0, x1, mass0, mass1, delta):
     return xt_samp, gt_samp, ut_samp, masst_samp/mass0, index
 
 
-def get_batch(helper, #  DataLoaderHelper 
+
+def get_batch(helper, 
               batch_size_per_condition, 
               batch_size_condition, 
               delta, 
               device):
     """
-    我们把adata在dataloader中预取 在get_batch中便可以对numpy切片
+    基于预计算的 OT Plan 动态采样
     """
-
-    ts, xts, uts, gts, massts, cons, donors = [], [], [], [], [], [], []
+    ts, xts, uts, gts, massts, cons = [], [], [], [], [], []
     
     sample_con_names = random.sample(helper.all_conditions, batch_size_condition)
     for cur_con in sample_con_names:
         gamma0_plan = helper.gamma0_plans[cur_con]
         gamma1_plan = helper.gamma1_plans[cur_con]
         
-        global_indices = helper.treated_indices_map[cur_con]
-        X_treated_cur = helper.X_treated_all[global_indices]
+        # 1. 提取当前 Condition 对应的局部切片
+        c_indices = helper.control_indices_dict[cur_con]
+        t_indices = helper.treated_indices_dict[cur_con]
         
-        x0, x1, idx_0, idx_1 = sample_from_ot_plan(
+        X_control_cur = helper.X_control_all[c_indices]
+        X_treated_cur = helper.X_treated_all[t_indices]
+        
+        cov_batch_dict = {k: [] for k in helper.cov_control_dict.keys()}
+        
+        # 2. 从 OT plan 采样。注意：返回的 idx_0, idx_1 是相对 X_control_cur 和 X_treated_cur 的局部索引
+        x0, x1, idx_0_rel, idx_1_rel = sample_from_ot_plan(
             gamma0_plan, 
-            helper.X_control, 
+            X_control_cur, 
             X_treated_cur, 
             batch_size_per_condition
         )
@@ -170,20 +206,25 @@ def get_batch(helper, #  DataLoaderHelper
         x0_tensor = torch.from_numpy(x0).float().to(device)
         x1_tensor = torch.from_numpy(x1).float().to(device)
 
+        # 3. 提取质量 (Mass)
+        # 这里 scipy sparse 的切片会返回 matrix，为了稳妥提取为 numpy array 展平
         if sparse.issparse(gamma0_plan):
-            m0_val = np.asarray(gamma0_plan[idx_0, idx_1]).reshape(-1, 1)
+            m0_val = np.asarray(gamma0_plan[idx_0_rel, idx_1_rel]).reshape(-1, 1)
+            m1_val = np.asarray(gamma1_plan[idx_0_rel, idx_1_rel]).reshape(-1, 1)
         else:
-            m0_val = gamma0_plan[idx_0, idx_1].reshape(-1, 1)
-        if sparse.issparse(gamma1_plan):
-            m1_val = np.asarray(gamma1_plan[idx_0, idx_1]).reshape(-1, 1)
-        else:
-            m1_val = gamma1_plan[idx_0, idx_1].reshape(-1, 1)
+            m0_val = gamma0_plan[idx_0_rel, idx_1_rel].reshape(-1, 1)
+            m1_val = gamma1_plan[idx_0_rel, idx_1_rel].reshape(-1, 1)
+            
+        # 注意如果因为稀疏矩阵返回了矩阵对象，可能需要 .squeeze()。如果原逻辑跑得通就保持不变。
+        if isinstance(m0_val, np.matrix): m0_val = m0_val.A
+        if isinstance(m1_val, np.matrix): m1_val = m1_val.A
         
         mass0 = torch.from_numpy(m0_val).float().to(device)
         mass1 = torch.from_numpy(m1_val).float().to(device)
         
         t_samp = torch.rand(x0_tensor.shape[0], 1, device=device)
         
+        # 4. 计算 Flow Matching 目标值
         xt_samp, gt_samp, ut_samp, masst_samp, index = compute_xt_ut_gt(
             t_samp, x0_tensor, x1_tensor, mass0, mass1, delta
         )
@@ -194,18 +235,24 @@ def get_batch(helper, #  DataLoaderHelper
         gts.append(gt_samp)
         massts.append(masst_samp)
         
+        # 5. 添加 Condition 向量
         cur_emb_np = helper.condition_emb_map[cur_con]
         cur_con_tensor = torch.tensor(cur_emb_np, dtype=torch.float32, device=device)
         cur_con_tensor = cur_con_tensor.unsqueeze(0).repeat(len(xt_samp), 1)
-        
         cons.append(cur_con_tensor)
 
-        if helper.donor_rep_keys is not None:
-            donor_np = helper.donor_control[idx_0] # 这里直接用control的donor 理论上如果后期混用
-            donor_np = donor_np[index.cpu().numpy()] 
-            donor_tensor = torch.from_numpy(donor_np).to(device).long()
-            donors.append(donor_tensor)
 
+        # 6. 处理所有 Covariates 信息
+        global_idx_0 = c_indices[idx_0_rel]
+        for key, val_all in helper.cov_control_dict.items():
+            val_np = val_all[global_idx_0]
+            val_np = val_np[index.cpu().numpy()] # 过一遍距离截断 filter
+            # 无论连续还是离散，先转成 tensor，后续模型里会自动按类型区分 long() 和 float()
+            cov_tensor = torch.from_numpy(val_np).to(device)
+            cov_batch_dict[key].append(cov_tensor)
+
+    # 7. 拼接并返回
+    final_cov_dict = {k: torch.cat(v) for k, v in cov_batch_dict.items()}
     return (torch.cat(ts), torch.cat(xts), torch.cat(uts), 
             torch.cat(gts), torch.cat(massts), torch.cat(cons),
-            torch.cat(donors) if donors else None)
+            final_cov_dict)

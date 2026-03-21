@@ -8,6 +8,7 @@ import ot
 from scipy import sparse
 from tqdm import tqdm
 import random
+import pandas as pd 
 
     
 
@@ -120,44 +121,50 @@ def compute_uot_plan_gpu(X_source, X_target,m_source=1,m_target=1, delta=1, reg_
     return res_G, res_g0, res_g1
 
 
-def pre_compute_wfr_ot(adata_control, 
-                       adata_treated, 
-                       save_path, 
-                       sample_rep='X_pca_scaled', 
-                       condition_keys="target_gene",
-                       donor_rep_keys=None,
-                       delta=1,
-                       reg_m=1,
-                       use_mini_batch_uot=True, 
-                       group_number=5,
-                       batch_save_size=10,
-                        draw = False): 
+
+def pre_compute_wfr_ot(
+        adata_control, 
+        adata_treated, 
+        save_path, 
+        sample_rep='X_pca_scaled', 
+        delta=1,
+        reg_m=1,
+        use_mini_batch_uot=True, 
+        group_number=5,
+        batch_save_size=10,
+        draw=False
+    ): 
     """
-    让ai写了一个断点重连逻辑
-    另外把result中储存方式改成了字典
-    新增donor_rep_keys字段
+    支持多维 Covariant 分组的 WFR-OT 计算函数。
+    直接通过读取 adata_treated.uns['covariate_info'] 进行动态匹配。
     """
-
-
-    if "normalized_m" in adata_control.uns:
-        m_source = adata_control.uns["normalized_m"]
-    else:
-        m_source = 1
-
-    if "normalized_m" in adata_treated.uns:
-        m_target = adata_treated.uns["normalized_m"]
-    else:
-        m_target = 1 
-
-    X_control = adata_control.obsm[sample_rep]
-    control_obs_names = adata_control.obs_names.to_numpy()
-    all_conditions = adata_treated.obs[condition_keys].unique().tolist()
-
-    grouped_indices = adata_treated.obs.groupby(condition_keys).indices 
+    
+    # 1. 解析协变量分组策略
+    cov_info = adata_treated.uns.get('covariate_info')
+    if cov_info is None or'stratification' not in cov_info:
+        raise ValueError("adata_treated.uns 必须包含 'covariate_info['stratification']' 以执行多维分组。")
+        
+    control_groups_keys = list(cov_info['stratification']['control_groups'])
+    perturbed_groups_keys = list(cov_info['stratification']['perturbed_groups'])
+    
+    # 2. 提取全局数据池
+    m_source = adata_control.uns.get("normalized_m", 1)
+    m_target = adata_treated.uns.get("normalized_m", 1)
+    
+    X_control_all = adata_control.obsm[sample_rep]
+    obs_names_control_all = adata_control.obs_names.to_numpy()
+    
     X_treated_all = adata_treated.obsm[sample_rep] 
     obs_names_treated_all = adata_treated.obs_names.to_numpy()
+
+    # 3. 构建高效的分组索引字典 (Pandas GroupBy)
+    control_gb = adata_control.obs.groupby(control_groups_keys)
+    treated_gb = adata_treated.obs.groupby(perturbed_groups_keys)
     
-    # 检查已完成的batch
+    # 提取所有 Treated 组的 keys (如果有多列，则是 tuple；如果只有1列，则是 scalar)
+    all_treated_keys = list(treated_gb.indices.keys())
+    
+    # 断点续传逻辑
     batch_dir = os.path.dirname(save_path) or '.'
     base_name = os.path.basename(save_path).replace('.pkl', '')
     completed_batches = []
@@ -168,34 +175,56 @@ def pre_compute_wfr_ot(adata_control,
     
     start_idx = max(completed_batches) if completed_batches else 0
     if start_idx > 0:
-        print(f"从batch {start_idx}恢复，已完成 {start_idx}/{len(all_conditions)}")
+        print(f"从batch {start_idx}恢复，已完成 {start_idx}/{len(all_treated_keys)}")
     
-    # 主循环 - 按batch处理
-    for batch_start in range(start_idx, len(all_conditions), batch_save_size):
-        batch_end = min(batch_start + batch_save_size, len(all_conditions))
+    # 4. 主循环 - 按batch处理
+    for batch_start in range(start_idx, len(all_treated_keys), batch_save_size):
+        batch_end = min(batch_start + batch_save_size, len(all_treated_keys))
         
-        # 每个batch独立的结果字典
         batch_results = {
-            "uot_plans": {},      # {condition: sparse_matrix}
-            "gamma0_plans": {},   # {condition: sparse_matrix}
-            "gamma1_plans": {},   # {condition: sparse_matrix}
-            "treat_obs_names": {} # {condition: [obs_names]}
+            "uot_plans": {},      
+            "gamma0_plans": {},   
+            "gamma1_plans": {},   
+            "treat_obs_names": {}, 
+            "control_obs_names": {} # 新增：现在每次 OT 对应的 Control 也是动态的
         }
         
-        # 处理当前batch
         for i in tqdm(range(batch_start, batch_end)):
-            cur_condition = all_conditions[i]
-            indices = grouped_indices[cur_condition]
-            X_treat_cur = X_treated_all[indices]
-            obs_names_cur = obs_names_treated_all[indices]
+            treated_val = all_treated_keys[i]
             
+            # (A) 规范化 Treated 值为 Tuple 及 Dict 形式
+            treated_val_tuple = treated_val if isinstance(treated_val, tuple) else (treated_val,)
+            treated_dict = dict(zip(perturbed_groups_keys, treated_val_tuple))
+            
+            # 生成结构化且可读的 Condition Name (例如: "cell_line:A549|dose_value:1.0|time:24.0")
+            cur_condition_name = "|".join([f"{k}:{v}" for k, v in treated_dict.items()])
+            
+            # (B) 根据字典映射，反推出 Control 需要匹配的 key
+            control_val_tuple = tuple(treated_dict[k] for k in control_groups_keys)
+            control_key = control_val_tuple[0] if len(control_groups_keys) == 1 else control_val_tuple
+            
+            # (C) 检查 Control 池子中是否存在对应的细胞
+            if control_key not in control_gb.indices:
+                print(f"警告: 找不到匹配的 Control 数据用于 {cur_condition_name} (需要的Control条件为 {control_key})。跳过。")
+                continue
+                
+            # (D) 提取当前的 Treated 和 Control 矩阵
+            treat_indices = treated_gb.indices[treated_val]
+            X_treat_cur = X_treated_all[treat_indices]
+            obs_names_treat_cur = obs_names_treated_all[treat_indices]
+            
+            control_indices = control_gb.indices[control_key]
+            X_control_cur = X_control_all[control_indices]
+            obs_names_control_cur = obs_names_control_all[control_indices]
+            
+            # (E) 计算 OT
             gamma, g0, g1 = compute_uot_plan_gpu(
-                X_control, X_treat_cur, 
-                m_source = m_source, m_target = m_target,
-                delta=delta, reg_m = reg_m,
+                X_control_cur, X_treat_cur, 
+                m_source=m_source, m_target=m_target,
+                delta=delta, reg_m=reg_m,
                 use_mini_batch_uot=use_mini_batch_uot, 
                 group_number=group_number,
-                draw = draw
+                draw=draw
             )
             
             if hasattr(gamma, 'cpu'):
@@ -206,34 +235,36 @@ def pre_compute_wfr_ot(adata_control,
 
             threshold = max(1e-4, 10 / X_treat_cur.shape[0])
             
-            batch_results["uot_plans"][cur_condition] = sparse.csr_matrix(gamma * (gamma >= threshold))
-            batch_results["gamma0_plans"][cur_condition] = sparse.csr_matrix(g0 * (g0 >= threshold))
-            batch_results["gamma1_plans"][cur_condition] = sparse.csr_matrix(g1 * (g1 >= threshold))
-            batch_results["treat_obs_names"][cur_condition] = obs_names_cur
+            # (F) 保存结果
+            batch_results["uot_plans"][cur_condition_name] = sparse.csr_matrix(gamma * (gamma >= threshold))
+            batch_results["gamma0_plans"][cur_condition_name] = sparse.csr_matrix(g0 * (g0 >= threshold))
+            batch_results["gamma1_plans"][cur_condition_name] = sparse.csr_matrix(g1 * (g1 >= threshold))
+            batch_results["treat_obs_names"][cur_condition_name] = obs_names_treat_cur
+            batch_results["control_obs_names"][cur_condition_name] = obs_names_control_cur
             
-            del gamma, g0, g1, X_treat_cur
-
+            del gamma, g0, g1, X_treat_cur, X_control_cur
+            
         gc.collect()
         
         # 保存batch并清空内存
         batch_path = os.path.join(batch_dir, f"{base_name}_batch_{batch_end}.pkl")
         with open(batch_path, 'wb') as f:
             pickle.dump(batch_results, f)
-        print(f"Batch saved: {batch_end}/{len(all_conditions)}")
+        print(f"Batch saved: {batch_end}/{len(all_treated_keys)}")
         
         del batch_results
         gc.collect()
     
-    # 合并所有batch到最终结果
+    # 5. 合并所有batch到最终结果
     print("合并所有batch...")
     final_results = {
-        "all_conditions": all_conditions, 
-        "control_obs_names": control_obs_names,
+        "all_conditions_computed": [], # 记录实际计算了的 condition string 列表
         "delta": delta,
         "uot_plans": {},
         "gamma0_plans": {},
         "gamma1_plans": {},
-        "treat_obs_names": {}
+        "treat_obs_names": {},
+        "control_obs_names": {} 
     }
     
     batch_files = sorted([f for f in os.listdir(batch_dir) 
@@ -243,11 +274,13 @@ def pre_compute_wfr_ot(adata_control,
     for batch_file in batch_files:
         with open(os.path.join(batch_dir, batch_file), 'rb') as f:
             batch_data = pickle.load(f)
-        for key in ["uot_plans", "gamma0_plans", "gamma1_plans", "treat_obs_names"]:
+        for key in ["uot_plans", "gamma0_plans", "gamma1_plans", "treat_obs_names", "control_obs_names"]:
             if key in batch_data:
                 final_results[key].update(batch_data[key])
         del batch_data
         gc.collect()
+        
+    final_results["all_conditions_computed"] = list(final_results["uot_plans"].keys())
     
     # 保存最终结果
     with open(save_path, 'wb') as f:
@@ -259,6 +292,7 @@ def pre_compute_wfr_ot(adata_control,
     
     print(f"完成！最终结果: {save_path}")
     return final_results
+    
 
 def seed_everything(seed=42):
 

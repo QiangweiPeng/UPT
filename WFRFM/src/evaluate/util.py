@@ -239,16 +239,19 @@ def _merge_on_perturbation(dfs, key="perturbation") -> pd.DataFrame:
 
     return merged
 
+    
+
 def evaluate_all(
     *,
     model,
     adata_control,
     adata_test,
-    target_genes,
+    target_conditions,   # 【修改】从 target_genes 改名，更符合现在的多维条件语境
+    cov_config,          # 【新增】传入协变量配置字典
     condition_keys,
     control_key,
     condition_rep_keys,
-    donor_rep_keys,
+    # donor_rep_keys,    # 【删除】已被 cov_config 统一接管
     sample_rep,
     device,
     results_save_path,
@@ -274,8 +277,8 @@ def evaluate_all(
     if adata_test is None:
         raise ValueError("adata_test is None, but evaluation needs treated data (adata_treated).")
 
-    if not target_genes:
-        print("target_genes empty")
+    if not target_conditions:
+        print("target_conditions empty")
         return [],[]
     os.makedirs(results_save_path, exist_ok=True)
 
@@ -294,10 +297,6 @@ def evaluate_all(
         device=device
     )
     
-    donor_source = None
-    if donor_rep_keys is not None and donor_rep_keys in adata_control.obs:
-        donor_np = adata_control.obs[donor_rep_keys].values[indices]
-        donor_source = torch.tensor(donor_np, dtype=torch.long, device=device)
 
     if "normalized_m" in adata_control.uns:
         m_source = adata_control.uns["normalized_m"]
@@ -309,40 +308,37 @@ def evaluate_all(
         model=model,
         adata_source=adata_source,
         adata_conditions=adata_test,
-        target_conditions=target_genes,
-        donor_source=donor_source,
+        target_conditions=target_conditions,
+        cov_config=cov_config,             
         condition_keys=condition_keys,
         embedding_key=condition_rep_keys,
-        source_rep=sample_rep,
         n_steps=n_steps,
         device=device,
         random_seed=random_seed,
-        m_source = m_source
+        m_source=m_source
     )
 
     # ---- reconstruct ----
+    # 这里的逻辑完全保持不变，因为 z_pred 和 m_pred 的数据流向和结构没有改变
     results_genes = None
     model_ref = None
     model_train = None
     model_test = None
 
-    # 我们可以reconstruct出原始基因表达
     if sample_rep in ["X_pca_scaled","X_pca"]:
         results_genes = batch_reconstruct_pca(
             inference_results=results_embedding,  
             ref_adata=adata_control        
         )
     elif sample_rep in ["X_scVI"]:
-        # batch_data = adata_control.obs['_scvi_batch'].values[indices]
         model_ref = scvi.model.SCVI.load(f"{scvi_model_load_path}_ref", adata=adata_control)
         model_train = scvi.model.SCVI.load(f"{scvi_model_load_path}_train", adata=adata_control)
         model_test = scvi.model.SCVI.load(f"{scvi_model_load_path}_test", adata=adata_control)
         results_genes = batch_reconstruct_scvi(
             inference_results=results_embedding,
-            scvi_model=model_ref,  # 传入模型
-            target_library_size=1e4, # 输出将被标准化到 10,000 counts
-            batch_idx = None, #全部投射到第0个batch
-            # batch_idx = torch.tensor(adata_control.obs['_scvi_batch'].values[indices], dtype=torch.long, device=device).unsqueeze(1) # 如果希望都投射到第0个batch 可以直接不传或者传None
+            scvi_model=model_ref,  
+            target_library_size=1e4, 
+            batch_idx=None, 
         )
     elif sample_rep =="X_flatvi":
         model_ref = scvi.model.SCVI.load(f"{scvi_model_load_path}_ref", adata=adata_control)
@@ -350,7 +346,7 @@ def evaluate_all(
             inference_results=results_embedding,
             flatvi_model=model_ref,
             target_library_size=1e4,
-            var_names = adata_control.var_names
+            var_names=adata_control.var_names
         )
     elif sample_rep == "X_state":
         from src.preprocessing import NBDecoder, NBDecoderTrainer
@@ -358,7 +354,7 @@ def evaluate_all(
         n_genes = adata_control.n_vars
         state_decoder = NBDecoder(z_dim=z_dim, n_genes=n_genes, hidden=(1024,2048,4096), dropout=0.1)
         trainer = NBDecoderTrainer(state_decoder, device="cuda", use_amp=False)
-        trainer.load(state_model_load_path)  # 会自动把 state_dict 加载到 trainer.decoder 里
+        trainer.load(state_model_load_path)  
         state_decoder = trainer.decoder
         state_decoder.eval()
         
@@ -366,10 +362,8 @@ def evaluate_all(
             inference_results=results_embedding,
             state_decoder=state_decoder,
             target_library_size=1e4,
-            var_names = adata_control.var_names
+            var_names=adata_control.var_names
         )
-
-
 
     # ---- evaluate ----
     latent_df = evaluate_latent(

@@ -8,7 +8,7 @@ import scvi
 import os
 import scipy.sparse as sp
 
-from .utils import convert_mixed_array_to_2d
+from .utils import convert_mixed_array_to_2d, prepare_covariates
 from .pca import centered_pca, project_pca, reconstruct_pca
 from .flatvi_wrapper import FlatVIEmbedding
 
@@ -44,7 +44,8 @@ def process_to_embedding(adata_control, adata_train,
                          control_key = "is_control",
                          condition_keys = "target_gene",
                          condition_rep_keys = "gene_embeddings",
-                         batch_key = "batch",
+                         condition_combined_keys = "condition_combined",
+                         cov_config = {},
                          condition_rep_dict = None,
                          flatvi_kwargs = None,
                          pca_method = "scanpy",
@@ -274,7 +275,22 @@ def process_to_embedding(adata_control, adata_train,
 
     else:
         raise ValueError("need condition_rep_dict")
+
+
+    
+    if cov_config is not None:
+        adata_control, adata_train, adata_test = prepare_covariates(
+            adata_control=adata_control,
+            adata_train=adata_train,
+            adata_test=adata_test,
+            cov_config=cov_config,
+            condition_keys=condition_keys,
+            condition_combined_keys=condition_combined_keys,
+        )
+
     
     
     return adata_control, adata_train, adata_test, model_ref, model_train, model_test
+
+
 
