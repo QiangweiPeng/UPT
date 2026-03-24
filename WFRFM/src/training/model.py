@@ -89,11 +89,12 @@ class TimeEncoder(nn.Module):
         return emb
 
 class FNet(nn.Module):
-    def __init__(self, in_out_dim, cov_config, covariate_info, 
+    def __init__(self, in_out_dim, 
+                 rulebook, # 【核心修改 1】：直接接收全局法典，抛弃 cov_config 和 covariate_info
                  hidden_dim_v=4096, n_hiddens_v=4, hidden_dim_g=2048, n_hiddens_g=2,
                  condition_dim=1280, con_embedding_dim=512, hidden_dim_con=1024, 
                  time_dim=1024, time_embedding_dim=256, hidden_dim_time=512, 
-                 bottle_dim=512, cov_emb_dim=64, # 每个协变量默认分配的维度
+                 bottle_dim=512, cov_emb_dim=64, 
                  dropout=0.1, activation='GELU'):
         super().__init__()
         
@@ -101,7 +102,7 @@ class FNet(nn.Module):
         self.activation = nn.GELU() if activation == "GELU" else nn.SiLU()
         self.dropout = dropout
 
-        # 1. Condition Encoder
+        # 1. Condition & Time Encoders (保持原样)
         self.condition_encoder = nn.Sequential(
             nn.LayerNorm(condition_dim),
             nn.Linear(condition_dim, hidden_dim_con),
@@ -111,38 +112,36 @@ class FNet(nn.Module):
             nn.Linear(hidden_dim_con, con_embedding_dim)
         )
 
-        # 2. Time Encoder MLP
         self.time_mlp = nn.Sequential(
             nn.Linear(time_dim, hidden_dim_time),
             self.activation,
             nn.Linear(hidden_dim_time, time_embedding_dim)
         )
 
-        # 3. Dynamic Covariate Encoders
+
+        # 基于 Rulebook 动态构建协变量编码器
         self.cov_encoders = nn.ModuleDict()
         self.total_cov_dim = 0
         self.cov_keys = []
 
-        for key, config in cov_config.items():
-            if not config.get('use_in_model', True):
-                continue
-            
-            self.cov_keys.append(key)
-            if config['type'] == 'categorical':
-                # 获取该类别对应的数量
-                num_classes = len(covariate_info['categorical_mappings'][key])
-                self.cov_encoders[key] = nn.Embedding(num_classes, cov_emb_dim)
-                self.total_cov_dim += cov_emb_dim
-            else: # continuous
-                # 连续变量通过一个小MLP或Linear转为embedding
-                self.cov_encoders[key] = nn.Sequential(
-                    nn.Linear(1, cov_emb_dim // 2),
-                    self.activation,
-                    nn.Linear(cov_emb_dim // 2, cov_emb_dim)
-                )
-                self.total_cov_dim += cov_emb_dim
+        # 离散变量 -> 建立 nn.Embedding
+        for cov_name in rulebook["model_inputs"]["categorical"].keys():
+            self.cov_keys.append(cov_name)
+            # 查法典获取该特征的总类别数
+            num_classes = len(rulebook["categorical_mappings"][cov_name])
+            self.cov_encoders[cov_name] = nn.Embedding(num_classes, cov_emb_dim)
+            self.total_cov_dim += cov_emb_dim
 
-        # 4. Networks
+        # 连续变量 -> 建立 MLP
+        for cov_name in rulebook["model_inputs"]["continuous"].keys():
+            self.cov_keys.append(cov_name)
+            self.cov_encoders[cov_name] = nn.Sequential(
+                nn.Linear(1, cov_emb_dim // 2),
+                self.activation,
+                nn.Linear(cov_emb_dim // 2, cov_emb_dim)
+            )
+            self.total_cov_dim += cov_emb_dim
+
         self.v_net = Velocity_GrowthNet(
             in_out_dim, in_out_dim, con_embedding_dim, time_embedding_dim, self.total_cov_dim,
             hidden_dim=hidden_dim_v, n_hiddens=n_hiddens_v,
@@ -157,28 +156,33 @@ class FNet(nn.Module):
 
     def forward(self, t, z, con, cov_dict):
         """
-        cov_dict: 一个字典，包含所有在 cov_config 中 use_in_model 为 True 的 key 对应的 Tensor
+        cov_dict: 直接来自 DataLoaderHelper get_batch 的输出字典
         """
-        # Encode Condition and Time
         c = self.condition_encoder(con)
         t_emb = self.t_encoder(t)
         t_emb = self.time_mlp(t_emb)
 
-        # Encode Covariates
         cov_embs = []
         for key in self.cov_keys:
             val = cov_dict[key]
-            if isinstance(self.cov_encoders[key], nn.Embedding):
-                # 类别型，确保是 LongTensor
-                cov_embs.append(self.cov_encoders[key](val.long()))
+            encoder = self.cov_encoders[key]
+            
+            if isinstance(encoder, nn.Embedding):
+                # DataLoader 已经在底层转成了 torch.long，这里直接过 Embedding
+                cov_embs.append(encoder(val))
             else:
-                # 连续型，确保维度是 [Batch, 1]
-                if val.dim() == 1: val = val.unsqueeze(-1)
-                cov_embs.append(self.cov_encoders[key](val.float()))
+                # DataLoader 已经在底层转成了 torch.float32，这里只需拉伸维度
+                if val.dim() == 1: 
+                    val = val.unsqueeze(-1)
+                cov_embs.append(encoder(val))
         
-        full_cov_emb = torch.cat(cov_embs, dim=-1)
+        # 即使没有任何协变量，由于我们初始化了空列表，这里做个防护
+        if len(cov_embs) > 0:
+            full_cov_emb = torch.cat(cov_embs, dim=-1)
+        else:
+            # 兼容 0 协变量的情况
+            full_cov_emb = torch.empty((z.size(0), 0), device=z.device)
 
-        # Forward through nets
         v = self.v_net(z, c, t_emb, full_cov_emb)
         g = self.g_net(z, c, t_emb, full_cov_emb)
 

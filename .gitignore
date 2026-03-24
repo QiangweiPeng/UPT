@@ -4,13 +4,18 @@ WFRFM/results/*
 WFRFM/*.pkl
 WFRFM/figures
 
+!WFRFM/data/make_embedding_*.py
+!WFRFM/data/pre_*.ipynb
+!WFRFM/data/target_*.csv
+!WFRFM/data/simulation_gene_data.csv
+
 !WFRFM/data/raw/
 WFRFM/data/raw/*
 !WFRFM/data/raw/.gitkeep
+
 !WFRFM/data/processed/
-!WFRFM/data/*.ipynb
 WFRFM/data/processed/*
-!WFRFM/data/processed/vcc_data_target_genes_embedding.pkl
+!WFRFM/data/processed/*.pkl
 
 !WFRFM/experiments/ot_plan/
 WFRFM/experiments/ot_plan/*

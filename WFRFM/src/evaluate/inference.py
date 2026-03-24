@@ -4,18 +4,19 @@ import anndata as ad
 from tqdm import tqdm
 import scanpy as sc
 
+
 @torch.no_grad()
 def wfr_euler_solve(
     model,
     z: torch.Tensor,
     cond: torch.Tensor,
-    cov_dict: dict,        # 新增：接收动态协变量字典
+    cov_dict: dict,        
     n_steps: int,
     dt: float,
     clamp_g: float = 100.0,
-    m_source: int = 1,
 ):
     """
+    Euler 求解器保持纯粹的数学逻辑，无需大改。
     输入: z [B, D], cond [B, C], cov_dict {key: [B]}
     输出: z_final [B, D], m_final [B, 1]
     """
@@ -27,33 +28,29 @@ def wfr_euler_solve(
         t_val = k * dt
         t = torch.full((B, 1), t_val, device=device, dtype=z.dtype)
 
-        # 传入 cov_dict
         v, g = model(t, z, cond, cov_dict)
         
         if g.dim() == 1: g = g.unsqueeze(1)
         g = g.clamp(-clamp_g, clamp_g)
 
-        z.add_(v * dt)
-        m.mul_(torch.exp(g * dt))
+        # 推荐使用非就地操作(out-of-place)避免潜在的视图覆盖问题
+        z = z + v * dt
+        m = m * torch.exp(g * dt)
         
     return z, m
-
-    
 
 
 @torch.no_grad()
 def run_batch_inference(
     model,
-    adata_source: torch.Tensor,       
-    adata_conditions: ad.AnnData,   
-    target_conditions: list,        
-    cov_config: dict,               
-    condition_keys: str = "target_gene", 
-    embedding_key: str = "gene_embeddings",
+    adata_source: ad.AnnData,       
+    rulebook: dict,                 
+    wishlist: list,                 
+    condition_embeddings: dict,     
+    condition_key_name: str = "perturbation", 
+    sample_rep: str = "X_pca_scaled",
     n_steps: int = 50,
-    device: str = "cuda",
-    random_seed: int = 42,
-    m_source: int = 1,
+    device: str = "cuda"
 ) -> dict:
     
     model.eval()
@@ -61,76 +58,113 @@ def run_batch_inference(
     dt = 1.0 / n_steps
     results = {}
 
-    z0 = adata_source
-    B = z0.shape[0] # Batch size
+    print(f"准备为 {len(wishlist)} 个条件进行推理...")
 
-    if len(target_conditions) > 0 and "|" in str(target_conditions[0]) and ":" in str(target_conditions[0]):
-        # 1. 自动从第一个 target condition 字符串推断出使用了哪些协变量 keys
-        # 例如从 "cell_line:A549|dose_value:1.0" 提取出 ['cell_line', 'dose_value']
-        inferred_keys = [chunk.split(':')[0] for chunk in target_conditions[0].split('|')]
-        
-        # 2. 动态在内存里创建一个临时的 Pandas Series 用于精准匹配
-        # 这一步的字符串格式与前面预计算 OT 时的格式严格对齐
-        match_series = adata_conditions.obs.apply(
-            lambda row: "|".join([f"{k}:{row[k]}" for k in inferred_keys]), 
-            axis=1
-        )
-    else:
-        # 如果传入的 condition 还是以前那种简单的 "TP53" 字符串，就回退到原本的单列匹配逻辑
-        match_series = adata_conditions.obs[condition_keys]
-    # =========================================================================
+    control_groups_keys = rulebook.get('stratification', {}).get('control_groups', [])
 
-    for cond_name in tqdm(target_conditions):
-        # 使用我们临时生成的 match_series 进行切片
-        subset = adata_conditions[match_series == cond_name]
-        
-        if subset.n_obs == 0:
-            print(f"⚠️ no observation for {cond_name}")
-            continue
+    for wish in tqdm(wishlist):
+        # 1. 严格按照法典中的 schema 顺序组装 Tuple
+        schema = rulebook["condition_tuple_schema"]
+        current_tuple = []
+        for var in schema:
+            current_tuple.append(wish[var])
+        cond_name = str(tuple(current_tuple)) 
             
-        # 1. 组装 Condition Embedding
-        cond_vec = torch.tensor(subset.obsm[embedding_key][0], dtype=torch.float32, device=device)
+
+        # 根据condition筛选起始control细胞
+        if len(control_groups_keys) == 0:
+            # 如果是 global OT，使用全部 Control
+            adata_source_cur = adata_source
+        else:
+            # 如果是 groupwise OT，精准匹配
+            mask = np.ones(len(adata_source), dtype=bool)
+            for k in control_groups_keys:
+                if k in wish:
+                    # 统一转为 string 匹配，最安全可靠
+                    mask = mask & (adata_source.obs[k].astype(str) == str(wish[k]))
+            
+            adata_source_cur = adata_source[mask]
+
+        # 如果当前切片没有 Control 细胞 (例如预测从未见过的细胞系)，只能跳过
+        if len(adata_source_cur) == 0:
+            print(f"\n⚠️ 警告: 找不到匹配的 Control 细胞作为起点，已跳过条件: {cond_name}")
+            continue
+
+        # 动态提取当前批次的 z0 和 Batch Size
+        z0_np = adata_source_cur.obsm[sample_rep]
+        z0 = torch.tensor(z0_np, dtype=torch.float32, device=device)
+        B = z0.shape[0] 
+
+        
+        # (A) 组装基础 Condition Embedding
+        base_cond_val = wish[condition_key_name]
+        cond_vec = condition_embeddings[base_cond_val]
+        
+        if not isinstance(cond_vec, torch.Tensor):
+            cond_vec = torch.tensor(cond_vec, dtype=torch.float32, device=device)
+            
+        # 扩展到动态的 Batch Size: [B, C]
         cond_batch = cond_vec.unsqueeze(0).expand(B, -1)
 
-        # 2. 动态组装 Covariates Dictionary
+        # (B) 根据法典组装 Covariates
         cov_dict_batch = {}
-        if cov_config is not None:
-            for key, config in cov_config.items():
-                if config.get('use_in_model', True):
-                    # 获取整列数据
-                    col_data = subset.obs[key]
+        
+        # -- 处理 Categorical --
+        for cov_name, info in rulebook["model_inputs"]["categorical"].items():
+            m_source = info["model_source"]
+            
+            if m_source in ["control", "base_cell"]:
+                obs_col = info["obs_col"]
+                val_np = adata_source_cur.obs[obs_col].to_numpy(dtype=np.int64)
+                cov_dict_batch[cov_name] = torch.tensor(val_np, device=device)
+            else:
+                raw_val = str(wish[cov_name])
+                idx = rulebook["categorical_mappings"][cov_name].get(raw_val, -1)
+                if idx == -1:
+                    raise ValueError(f"严重错误: 愿望清单中的 {cov_name}={raw_val} 在法典中未找到映射！")
+                
+                cov_dict_batch[cov_name] = torch.full((B,), idx, dtype=torch.long, device=device)
+
+        # -- 处理 Continuous --
+        for cov_name, info in rulebook["model_inputs"]["continuous"].items():
+            m_source = info["model_source"]
+            
+            if m_source in ["control", "base_cell"]:
+                # 【核心修复 3】：同样从 adata_source_cur 剥离
+                obs_col = info["obs_col"]
+                val_np = adata_source_cur.obs[obs_col].to_numpy(dtype=np.float32)
+                cov_dict_batch[cov_name] = torch.tensor(val_np, device=device)
+            else:
+                raw_val = float(wish[cov_name])
+                stats = rulebook["continuous_stats"][cov_name]
+                mu, std, transform = stats["mean"], stats["std"], stats["transform"]
+                
+                if transform == "log1p_zscore":
+                    val_tf = np.log1p(raw_val)
+                else:
+                    val_tf = raw_val
                     
-                    if config['type'] == 'categorical':
-                        # --- 【关键修复：提取整数编码 (Category Codes)】 ---
-                        # 获取第一个细胞对应的整数分类索引
-                        val = col_data.cat.codes.values[0]
-                        cov_tensor = torch.full((B,), int(val), dtype=torch.long, device=device)
-                    else:
-                        # 连续型变量处理保持不变
-                        val = col_data.values[0]
-                        cov_tensor = torch.full((B,), float(val), dtype=torch.float32, device=device)
-                        
-                    cov_dict_batch[key] = cov_tensor
+                scaled_val = (val_tf - mu) / std
+                cov_dict_batch[cov_name] = torch.full((B,), scaled_val, dtype=torch.float32, device=device)
 
-
-
-        # 3. 运行 ODE Solver
+        # (C) 运行 ODE Solver
         z_pred, m_pred = wfr_euler_solve(
             model, 
             z0.clone(), 
             cond_batch, 
-            cov_dict_batch, # 传入组装好的协变量字典
+            cov_dict_batch, 
             n_steps, 
-            dt, 
-            m_source=m_source
+            dt
         )
 
+        # (D) 保存结果
         results[cond_name] = {
             'z_pred': z_pred.cpu().numpy(),
             'm_pred': m_pred.cpu().numpy()
         }
 
     return results
+
 
 
 

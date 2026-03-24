@@ -1,2 +1,10 @@
 # conditional_wfr_flow_matching
 This repository is the code implementation of (conditional) wfr flow matching.
+
+update:
+
+cov_config: 支持自定义的covariant输入，删除了donor等旧实现; 
+make_embedding: data中提供了若干make_embedding脚本，进行不同的condition embedding；对于drug要先获取smiles再输入chembert;输入的csv文件可以简单自己获取一下
+pre_:data中提供对数据集的hvg等预处理，请先normalize log1p hvg筛选后获得h5ad再输入notebook中的preprocess
+src:为支持cov_config重构了大量代码，旧的评估函数可能已不再支持(eval_plot,evals_new_backed) 将原来的condition_keys替换为新增的condition_combined_keys或许可以兼容部分旧代码(正确性可能需要再检查)
+

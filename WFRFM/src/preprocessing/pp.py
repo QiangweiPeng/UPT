@@ -284,9 +284,11 @@ def process_to_embedding(adata_control, adata_train,
             adata_train=adata_train,
             adata_test=adata_test,
             cov_config=cov_config,
-            condition_keys=condition_keys,
+            condition_keys=condition_keys,   
             condition_combined_keys=condition_combined_keys,
         )
+
+
 
     
     

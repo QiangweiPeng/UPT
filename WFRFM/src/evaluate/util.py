@@ -240,21 +240,27 @@ def _merge_on_perturbation(dfs, key="perturbation") -> pd.DataFrame:
     return merged
 
     
+import os
+import torch
+import numpy as np
+import anndata as ad
+import scvi
+
 
 def evaluate_all(
     *,
     model,
     adata_control,
     adata_test,
-    target_conditions,   # 【修改】从 target_genes 改名，更符合现在的多维条件语境
-    cov_config,          # 【新增】传入协变量配置字典
-    condition_keys,
+    wishlist,            # 【核心修改 1】：从 target_conditions 改为 wishlist (List of Dicts)
+    condition_keys,      # 代表基础扰动的列名，如 'perturbation'
     control_key,
-    condition_rep_keys,
-    # donor_rep_keys,    # 【删除】已被 cov_config 统一接管
+    condition_rep_keys,  # e.g., 'gene_embeddings'
+    condition_combined_keys,
     sample_rep,
     device,
     results_save_path,
+    mass_deduct_keys = None,
     n_particles: int = 10000,
     random_seed: int = 42,
     n_steps: int = 50,
@@ -272,17 +278,33 @@ def evaluate_all(
     save_each: bool = True,
     save_final: bool = True,
     final_filename: str = "final_metrics.csv",
-    detailed: bool = True # 是否只放出mean
+    detailed: bool = True,
+    use_groupwise_control: bool = True,
 ):
     if adata_test is None:
         raise ValueError("adata_test is None, but evaluation needs treated data (adata_treated).")
 
-    if not target_conditions:
-        print("target_conditions empty")
-        return [],[]
+    if not wishlist:
+        print("wishlist is empty")
+        return [], []
+        
     os.makedirs(results_save_path, exist_ok=True)
+    
+    # ---- 1. 解析法典与构建 Embedding 字典 ----
+    rulebook = adata_test.uns.get('global_rulebook')
+    if rulebook is None:
+        raise ValueError("adata_test.uns 缺少 'global_rulebook'。请先运行 prepare_covariates。")
 
-    # ---- sample source cells ----
+    # 自动从 Control 和 Test 集中收集所有出现过的基础扰动 (如药物) 的 Embedding
+    condition_embeddings = {}
+    for adata in [adata_control, adata_test]:
+        if condition_rep_keys in adata.obsm:
+            for pert in adata.obs[condition_keys].unique():
+                if pert not in condition_embeddings:
+                    idx = np.where(adata.obs[condition_keys] == pert)[0][0]
+                    condition_embeddings[pert] = adata.obsm[condition_rep_keys][idx]
+
+    # ---- 2. 采样起点细胞 X_0 ----
     all_indices = np.arange(adata_control.n_obs)
     rng = np.random.default_rng(random_seed)
     indices = (
@@ -291,41 +313,29 @@ def evaluate_all(
         else all_indices
     )
 
-    adata_source = torch.tensor(
-        adata_control.obsm[sample_rep][indices],
-        dtype=torch.float32,
-        device=device
-    )
-    
+    # 【核心修改 3】：不再剥离为 Tensor！直接传 AnnData 切片，保留 .obs 供推理器抽取固有属性！
+    adata_source_subset = adata_control[indices].copy()
 
-    if "normalized_m" in adata_control.uns:
-        m_source = adata_control.uns["normalized_m"]
-    else:
-        m_source = 1
-
-    # ---- inference ----
+    # ---- 3. Inference (凭空造物) ----
     results_embedding = run_batch_inference(
         model=model,
-        adata_source=adata_source,
-        adata_conditions=adata_test,
-        target_conditions=target_conditions,
-        cov_config=cov_config,             
-        condition_keys=condition_keys,
-        embedding_key=condition_rep_keys,
+        adata_source=adata_source_subset,  # 传入 AnnData 格式的 X_0
+        rulebook=rulebook,                 # 传入法典
+        wishlist=wishlist,                 # 传入愿望清单
+        condition_embeddings=condition_embeddings, # 传入提取好的特征库
+        condition_key_name=condition_keys,
+        sample_rep=sample_rep,
         n_steps=n_steps,
-        device=device,
-        random_seed=random_seed,
-        m_source=m_source
+        device=device
     )
 
-    # ---- reconstruct ----
-    # 这里的逻辑完全保持不变，因为 z_pred 和 m_pred 的数据流向和结构没有改变
+    # ---- 4. Reconstruct (保持原样) ----
     results_genes = None
     model_ref = None
     model_train = None
     model_test = None
 
-    if sample_rep in ["X_pca_scaled","X_pca"]:
+    if sample_rep in ["X_pca_scaled", "X_pca"]:
         results_genes = batch_reconstruct_pca(
             inference_results=results_embedding,  
             ref_adata=adata_control        
@@ -340,7 +350,7 @@ def evaluate_all(
             target_library_size=1e4, 
             batch_idx=None, 
         )
-    elif sample_rep =="X_flatvi":
+    elif sample_rep == "X_flatvi":
         model_ref = scvi.model.SCVI.load(f"{scvi_model_load_path}_ref", adata=adata_control)
         results_genes = batch_reconstruct_flatvi(
             inference_results=results_embedding,
@@ -365,45 +375,55 @@ def evaluate_all(
             var_names=adata_control.var_names
         )
 
-    # ---- evaluate ----
+    # ---- 5. Evaluate (评估) ----
+    # 🚨 注意：由于现在的 results_embedding 的 key 是从 wishlist 拼出来的字符串 (如 "DrugA_MCF7_1.0")
+    # 下游的 evaluate_latent 等函数切片 adata_treated 时，匹配的 column 需要对应得上。
+    # 建议将 pert_key 传为你生成的 condition_combined_keys，或者在评估函数内部适配字符串解析。
+    
     latent_df = evaluate_latent(
         results_embedding=results_embedding,
         adata_treated=adata_test,
         adata_control=adata_control,
-        pert_key=condition_keys,
+        pert_key=condition_combined_keys,  # 确保传入的是 Tuple 字符串列名
         control_label=control_key,
-        embedding_key=sample_rep
+        embedding_key=sample_rep,
+        rulebook=rulebook,                 # 传入法典
+        use_groupwise_control=use_groupwise_control       # 开启精细化筛选选项
     )
     avg_df = evaluate_population_average(
         results_genes=results_genes,
         adata_treated=adata_test,
         adata_control=adata_control,
-        pert_key=condition_keys,
+        pert_key=condition_combined_keys,
         control_label=control_key,
         embedding_key=sample_rep,
         Edistance_sample_num=Edistance_sample_num,
         random_seed=random_seed,
-        detailed = detailed
+        detailed=detailed,
+        rulebook=rulebook,                 # 传入法典
+        use_groupwise_control= use_groupwise_control,      # 开启精细化筛选选项
+        mass_deduct_keys= mass_deduct_keys,
     )
     dist_df = evaluate_population_distribution(
         results_genes=results_genes,
         adata_treated=adata_test,
         adata_control=adata_control,
-        pert_key=condition_keys,
+        pert_key=condition_combined_keys,
         max_cells=dist_max_cells,
         max_genes=dist_max_genes,
         n_bins=dist_n_bins,
         top_n_degs=dist_top_n_degs,
-        seed=random_seed
+        seed=random_seed,
+        rulebook=rulebook,                 # 传入法典
+        use_groupwise_control= use_groupwise_control        # 开启精细化筛选选项
     )
 
-    # ---- save each ----
+    # ---- 6. Save (保存) ----
     if save_each:
         _ensure_perturbation_col(latent_df).to_csv(os.path.join(results_save_path, "latent_metrics.csv"), index=False)
         _ensure_perturbation_col(avg_df).to_csv(os.path.join(results_save_path, "average_metrics.csv"), index=False)
         _ensure_perturbation_col(dist_df).to_csv(os.path.join(results_save_path, "distribution_metrics.csv"), index=False)
 
-    # ---- merge into final df (the one you want) ----
     final_df = _merge_on_perturbation([latent_df, avg_df, dist_df], key="perturbation")
     if detailed:
         final_df = final_df.sort_values("perturbation").reset_index(drop=True)
@@ -423,6 +443,3 @@ def evaluate_all(
         "dist_df": dist_df,
     }
     return final_df, artifacts
-
-
-

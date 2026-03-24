@@ -40,6 +40,8 @@ def convert_mixed_array_to_2d(arr):
     
     return result
 
+
+    
 import numpy as np
 import pandas as pd
 import copy
@@ -50,76 +52,108 @@ def prepare_covariates(
 ):
     adatas = {"control": adata_control, "train": adata_train, "test": adata_test}
     
-    # 核心元数据结构
-    cov_info = {
+
+    # 在预处理阶段把cov_config整合成一个rulebook，写入adata.uns
+    rulebook = {
         "categorical_mappings": {},
         "continuous_stats": {},
-        "model_inputs": {"categorical": [], "continuous": []},
+        "model_inputs": {"categorical": {}, "continuous": {}},
         "stratification": {"control_groups": [], "perturbed_groups": []},
-        "combined_logic": {"base": condition_keys, "constituents": []}
+        "condition_tuple_schema": [condition_keys] 
     }
 
-    # 1. 基础协变量处理 (Categorical & Continuous)
     for cov_name, cfg in cov_config.items():
-        # 记录分层逻辑
         if cfg.get("control_ot") == "groupwise":
-            cov_info["stratification"]["control_groups"].append(cov_name)
+            rulebook["stratification"]["control_groups"].append(cov_name)
         if cfg.get("perturbed_ot") == "groupwise":
-            cov_info["stratification"]["perturbed_groups"].append(cov_name)
+            rulebook["stratification"]["perturbed_groups"].append(cov_name)
         
-        # 处理参与 combined 的逻辑
-        if cfg.get("contain_in_condition_combined_keys"):
-            cov_info["combined_logic"]["constituents"].append(cov_name)
+        if cfg.get("contain_in_condition"):
+            rulebook["condition_tuple_schema"].append(cov_name)
 
-        # 类型转换与特征提取
+        # 离散变量 
         if cfg["type"] == "categorical":
-            all_series = pd.concat([a.obs[cov_name] for a in adatas.values()]).astype(str)
+            all_series = pd.concat([a.obs[cov_name] for a in adatas.values() if cov_name in a.obs]).astype(str)
             cat2idx = {cat: idx for idx, cat in enumerate(sorted(all_series.unique()))}
-            cov_info["categorical_mappings"][cov_name] = cat2idx
+            rulebook["categorical_mappings"][cov_name] = cat2idx #保存映射，inference时使用
             
             for adata in adatas.values():
-                adata.obs[f"{cov_name}_idx"] = adata.obs[cov_name].astype(str).map(cat2idx).astype(np.int64)
+                # 添加一个{cov_name}_idx的obs列，供模型输入
+                adata.obs[f"{cov_name}_idx"] = adata.obs[cov_name].astype(str).map(cat2idx).fillna(-1).astype(np.int64)
+                
+            
+            # 记录模型输入的数据来源
             if cfg.get("use_in_model"):
-                cov_info["model_inputs"]["categorical"].append(f"{cov_name}_idx")
+                rulebook["model_inputs"]["categorical"][cov_name] = {
+                    "obs_col": f"{cov_name}_idx",
+                    "model_source": cfg.get("model_source", "both") 
+                }
 
+        # 连续变量 
         elif cfg["type"] == "continuous":
-            # 统一转为 float32 并计算 train 统计量
+            #连续变量先log1p再算zscore
+            transform_type = cfg.get("transform", "log1p_zscore")
+            
             for a in adatas.values():
                 a.obs[cov_name] = pd.to_numeric(a.obs[cov_name], errors="coerce").astype(np.float32)
             
-            train_vals = np.log1p(adata_train.obs[cov_name].values)
-            mu, std = float(train_vals.mean()), float(train_vals.std())
-            std = 1.0 if std == 0 else std
-            cov_info["continuous_stats"][cov_name] = {"mean": mu, "std": std}
+            train_vals = adata_train.obs[cov_name].values
+            if transform_type == "log1p_zscore":
+                train_vals_tf = np.log1p(train_vals)
+            else:
+                train_vals_tf = train_vals
+                
+            mu, std = float(np.nanmean(train_vals_tf)), float(np.nanstd(train_vals_tf))
+            std = 1.0 if std == 0 or np.isnan(std) else std
+
+            rulebook["continuous_stats"][cov_name] = {
+                "mean": mu, 
+                "std": std, 
+                "transform": transform_type
+            }
 
             for adata in adatas.values():
-                log_v = np.log1p(adata.obs[cov_name].values)
-                adata.obs[f"{cov_name}_scaled"] = (log_v - mu) / std
+                vals = adata.obs[cov_name].values
+                if transform_type == "log1p_zscore":
+                    vals_tf = np.log1p(vals)
+                else:
+                    vals_tf = vals
+                adata.obs[f"{cov_name}_scaled"] = (vals_tf - mu) / std
+                
             if cfg.get("use_in_model"):
-                cov_info["model_inputs"]["continuous"].append(f"{cov_name}_scaled")
+                rulebook["model_inputs"]["continuous"][cov_name] = {
+                    "obs_col": f"{cov_name}_scaled",
+                    "model_source": cfg.get("model_source", "both")
+                }
 
-    # 2. 构造 condition_combined_keys (采样锚点)
-    combine_vars = cov_info["combined_logic"]["constituents"]
+
+    # 对于condition和cov的组合，用tuple来唯一地标识
+    # (pertubation,cov1,cov2)这样
+    schema = rulebook["condition_tuple_schema"]
     
     for split_name, adata in adatas.items():
-        # 初始串：perturbation 列
-        res = adata.obs[condition_keys].astype(str)
-        
-        for var in combine_vars:
-            cfg = cov_config[var]
-            if split_name == "control" and cfg.get("condition_combined_from") == "perturbed":
-                # 对标剂量/时间，Control 组统一标记为 'control' 以便采样匹配
-                vals = "control"
-            else:
-                # cell_line 等 both 类型，或者扰动组的剂量，保留真实值
-                vals = adata.obs[var].astype(str)
+        tuples_list = []
+        for idx, row in adata.obs.iterrows():
+            base_cond = str(row[condition_keys]) 
+            current_tuple = [base_cond]
             
-            res = res + "_" + vals
-        
-        adata.obs[condition_combined_keys] = res
+            for var in schema[1:]:
+                cfg = cov_config[var]
+                
+                if split_name == "control" and cfg.get("condition_source") == "perturbed": #对于control 有些cov是没有的 用统一的占位符补充
+                    if cfg["type"] == "categorical":
+                        current_tuple.append("control")
+                    elif cfg["type"] == "continuous":
+                        current_tuple.append(0.0)
+                else:
+                    current_tuple.append(row[var])
+            
+            tuples_list.append(str(tuple(current_tuple)))
+            
+        adata.obs[condition_combined_keys] = tuples_list # 新增一个condition_combined_keys列，里面存放着组合后的condition的唯一标识
 
-    # 3. 将元数据注入 uns 并返回
+
     for adata in adatas.values():
-        adata.uns["covariate_info"] = copy.deepcopy(cov_info)
+        adata.uns["global_rulebook"] = copy.deepcopy(rulebook)
 
     return adata_control, adata_train, adata_test

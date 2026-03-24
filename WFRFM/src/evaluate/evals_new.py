@@ -17,6 +17,49 @@ from scipy import sparse
 import warnings  
 
 
+import ast
+import numpy as np
+
+def _get_matched_control(adata_control, pert_tuple_str, rulebook, use_groupwise_control=True):
+    """
+    根据 rulebook 动态解析 tuple 字符串，从 adata_control 中筛选出精准的 Control 细胞子集。
+    如果匹配失败或未开启该选项，安全地回退(fallback)到全局 Control。
+    """
+    if not use_groupwise_control or not rulebook:
+        return adata_control
+        
+    # 【核心修复】：AnnData 会将 .uns 中的 list 序列化为 numpy array
+    # 使用 len() 判断避免 ambiguous 报错，并强制转回 list 保证后续 in 逻辑正常
+    control_groups = rulebook.get('stratification', {}).get('control_groups', [])
+    if len(control_groups) == 0:
+        return adata_control
+        
+    control_groups = list(control_groups)
+    schema = list(rulebook.get("condition_tuple_schema", []))
+    
+    try:
+        actual_tuple = ast.literal_eval(pert_tuple_str)
+        mask = np.ones(adata_control.n_obs, dtype=bool)
+        
+        for i, col in enumerate(schema):
+            if col in control_groups:
+                # 统一转 string 匹配，防止类型导致的 KeyError
+                mask &= (adata_control.obs[col].astype(str) == str(actual_tuple[i]))
+                
+        curr_ctrl_sub = adata_control[mask]
+        
+        if len(curr_ctrl_sub) > 0:
+            return curr_ctrl_sub
+        else:
+            print(f"⚠️ 警告: 未找到 {pert_tuple_str} 对应的 Groupwise Control 细胞，已回退到全局 Control。")
+            return adata_control
+    except Exception as e:
+        print(f"⚠️ 警告: 解析 Control Tuple {pert_tuple_str} 失败 ({e})，已回退到全局 Control。")
+        return adata_control
+
+
+
+
 def adata_to_numpy(data, copy=True, dtype="float32"):
     """
     稳健地转换为 numpy.ndarray。
@@ -98,20 +141,17 @@ def compute_edistance_torch(X, Y, max_n=2000, seed=42, device='cuda'):
     return result.item()
 
 
-
 def evaluate_latent(
     results_embedding, 
     adata_treated, 
     adata_control, 
     pert_key="condition", 
     control_label="is_control",
-    embedding_key="sample_rep_scaled"
+    embedding_key="sample_rep_scaled",
+    rulebook=None,                     # 【新增】传入法典
+    use_groupwise_control=True         # 【新增】控制开关
 ):
     metrics_list = []
-    
-    true_emb_ctrl = get_embedding(adata_control, embedding_key)
-    ctrl_mean_latent = np.nanmean(true_emb_ctrl, axis=0)
-
     pert_names = list(results_embedding.keys())
     print(f"Start evaluating {len(pert_names)} perturbations (Pseudo-bulk)")
 
@@ -123,20 +163,25 @@ def evaluate_latent(
             print(f"{pert} no observation")
             continue
             
+        # 【核心修改】：动态获取当前 Pert 对应的 Control 子集
+        curr_ctrl = _get_matched_control(adata_control, pert, rulebook, use_groupwise_control)
+        true_emb_ctrl = get_embedding(curr_ctrl, embedding_key)
+        ctrl_mean_latent = np.nanmean(true_emb_ctrl, axis=0)
+            
         # latent space
         Z_true = get_embedding(adata_true_pert, embedding_key)
         Z_pred = results_embedding[pert]['z_pred']
-        Z_m_pred = results_embedding[pert]['m_pred'].flatten()
-        Z_m_pred = np.asarray(Z_m_pred)
+        
+        Z_m_pred = np.asarray(results_embedding[pert]['m_pred'].flatten())
         Z_m_pred = Z_m_pred / Z_m_pred.sum()
         
         z_mean_true = np.mean(Z_true, axis=0)
-        z_mean_pred = np.average(Z_pred, axis=0, weights = Z_m_pred)
+        z_mean_pred = np.average(Z_pred, axis=0, weights=Z_m_pred)
         
-
         row['latent_mse'] = np.mean((z_mean_true - z_mean_pred)**2)
         row['latent_cosine'] = 1 - cosine(z_mean_true, z_mean_pred)
         
+        # 这里的 Delta 计算现在基于了精准匹配的 Control 均值
         delta_z_true = z_mean_true - ctrl_mean_latent
         delta_z_pred = z_mean_pred - ctrl_mean_latent
         row['latent_delta_cosine'] = 1 - cosine(delta_z_true, delta_z_pred)
@@ -144,12 +189,16 @@ def evaluate_latent(
         metrics_list.append(row)
 
     df = pd.DataFrame(metrics_list)
-    mean_row = df.drop(columns=['perturbation']).mean(numeric_only=True).to_dict()
-    mean_row['perturbation'] = 'mean'
-    df = pd.concat([df, pd.DataFrame([mean_row])], ignore_index=True)
+    if not df.empty:
+        mean_row = df.drop(columns=['perturbation']).mean(numeric_only=True).to_dict()
+        mean_row['perturbation'] = 'mean'
+        df = pd.concat([df, pd.DataFrame([mean_row])], ignore_index=True)
     
     return df
 
+import numpy as np
+import pandas as pd
+from scipy.stats import pearsonr, spearmanr
 
 def evaluate_population_average(
     results_genes, 
@@ -158,23 +207,18 @@ def evaluate_population_average(
     pert_key="condition", 
     control_label="is_control",
     embedding_key="sample_rep_scaled", 
-    Edistance_sample_num = 2000,
-    random_seed = 42,
-    detailed = True
+    Edistance_sample_num=2000,
+    random_seed=42,
+    detailed=True,
+    rulebook=None,                    
+    use_groupwise_control=True,        
+    mass_deduct_keys=None              # 【新增】：用于计算孔数折扣的列名
 ):
     metrics_list = []
     
-    X_ctrl = adata_to_numpy(adata_control)
-    mean_ctrl = np.nanmean(X_ctrl, axis=0)
-    
-    if "normalized_m" in adata_control.uns:
-        m_source = adata_control.uns["normalized_m"]
-    else:
-        m_source = 1
-    m_ctrl_sum = adata_control.n_obs * m_source
-    
-    # true_emb_ctrl = get_embedding(adata_control, embedding_key)
-    # ctrl_mean_latent = np.nanmean(true_emb_ctrl, axis=0)
+    # 提取全局的基础 mass 倍数
+    m_source_val = adata_control.uns.get("normalized_m", 1.0)
+    m_target_val = adata_treated.uns.get("normalized_m", 1.0)
 
     pert_names = list(results_genes.keys())
     print(f"Start evaluating {len(pert_names)} perturbations (Pseudo-bulk)")
@@ -186,25 +230,54 @@ def evaluate_population_average(
         if adata_true_pert.n_obs == 0:
             print(f"{pert} no observation")
             continue
-        X_true = adata_to_numpy(adata_true_pert)
-
-        if "normalized_m" in adata_treated.uns:
-            m_target = adata_treated.uns["normalized_m"]
-        else:
-            m_target = 1
-        m_true_sum = adata_true_pert.n_obs * m_target
-        m_true_change = m_true_sum / m_ctrl_sum
+            
+        # 1. 获取精准 Control
+        curr_ctrl = _get_matched_control(adata_control, pert, rulebook, use_groupwise_control)
         
+        if curr_ctrl.n_obs == 0:
+            print(f"Warning: {pert} has no matching control cells. Skipping.")
+            continue
+            
+        X_ctrl = adata_to_numpy(curr_ctrl)
+        mean_ctrl = np.nanmean(X_ctrl, axis=0)
+
+        # -----------------------------------------------------------------
+        # 2. 【核心修复】：Mass/Well-count 折扣逻辑对齐训练端
+        # -----------------------------------------------------------------
+        if mass_deduct_keys is not None and mass_deduct_keys in curr_ctrl.obs.columns and mass_deduct_keys in adata_true_pert.obs.columns:
+            # 统计独立孔数
+            n_unique_source = len(curr_ctrl.obs[mass_deduct_keys].unique())
+            n_unique_target = len(adata_true_pert.obs[mass_deduct_keys].unique())
+            
+            # 计算受孔数调整后的目标 Mass 比例 (与 pre_compute_wfr_ot 保持绝对一致)
+            adj_m_target = m_target_val * max(1, n_unique_source) / max(1, n_unique_target)
+        else:
+            adj_m_target = m_target_val
+
+        # 计算 Ground Truth 的质量变化 (这是模型拟合的终极目标)
+        m_true_sum = adata_true_pert.n_obs * adj_m_target
+        m_ctrl_sum = curr_ctrl.n_obs * m_source_val
+        m_true_change = m_true_sum / m_ctrl_sum if m_ctrl_sum > 0 else 1.0
+        
+        # 提取预测结果
         adata_pred_pert = results_genes[pert]
         X_pred = adata_to_numpy(adata_pred_pert)
-        m_pred = adata_pred_pert.obs['mass']
-        m_pred = np.asarray(m_pred)
-        m_pred_sum = m_pred.sum()
-        m_pred_change = m_pred_sum / (adata_pred_pert.n_obs * m_source)
-        m_pred = m_pred / m_pred_sum
         
+        # 获取 ODE 预测的原始 mass
+        m_pred_raw = np.asarray(adata_pred_pert.obs['mass'])
+        
+        # 预测的质量变化: ODE 输出的 mass 本身就是相对于起始细胞的倍数
+        # 直接求均值即可反映群体平均的增殖/死亡率，不受推理采样点数(N_particles)影响
+        m_pred_change = np.mean(m_pred_raw) 
+        
+        # 为了计算基因均值，对预测的 mass 进行内部归一化作为权重
+        m_pred_sum = m_pred_raw.sum()
+        m_pred_weights = m_pred_raw / m_pred_sum if m_pred_sum > 0 else np.ones_like(m_pred_raw) / len(m_pred_raw)
+        # -----------------------------------------------------------------
+
+        X_true = adata_to_numpy(adata_true_pert)
         mean_true = np.nanmean(X_true, axis=0)
-        mean_pred = np.average(X_pred, axis=0, weights = m_pred) # 根据 m_pred 加权
+        mean_pred = np.average(X_pred, axis=0, weights=m_pred_weights) 
 
         # MSE
         mse = np.mean((mean_true - mean_pred) ** 2)
@@ -218,16 +291,16 @@ def evaluate_population_average(
         mae = np.mean(np.abs(mean_true - mean_pred))
         row['mae_gene'] = mae
 
-
-        #R^2
+        # R^2
         var_true = np.var(mean_true) 
-        r2 = 1 - (mse / var_true)
+        r2 = 1 - (mse / var_true) if var_true > 0 else 0
         row['r2_gene'] = r2
 
         if detailed:
-            row['r2_true'] = 1 - ( mse_true / np.var(mean_ctrl))
+            var_ctrl = np.var(mean_ctrl)
+            row['r2_true'] = 1 - (mse_true / var_ctrl) if var_ctrl > 0 else 0
 
-        # deg 50  这里deg逻辑和scanpy不同
+        # deg 50 (基于精确对齐的 mean_ctrl)
         diff_abs = np.abs(mean_true - mean_ctrl)
         top50_idx = np.argsort(diff_abs)[-50:]
         
@@ -236,54 +309,46 @@ def evaluate_population_average(
         
         mse_deg = np.mean((mean_true_deg - mean_pred_deg) ** 2)
         var_true_deg = np.var(mean_true_deg)
-        r2_deg = 1 - (mse_deg / var_true_deg)
-        
-        row['r2_gene_deg50'] = r2_deg
+        row['r2_gene_deg50'] = 1 - (mse_deg / var_true_deg) if var_true_deg > 0 else 0
         row['mse_gene_deg50'] = mse_deg
-
 
         # E-distance
         e_vals = []
-        for seed in [random_seed*0, random_seed*1, random_seed*2, random_seed*3, random_seed*4]: # MC引入m_pred
+        for seed in [random_seed*i for i in range(5)]:
             rng = np.random.default_rng(seed)
-            idx = rng.choice(
-                np.arange(X_pred.shape[0]),
-                size=min(Edistance_sample_num, X_pred.shape[0]),
-                replace=True,
-                p=m_pred
-            )
+            # 使用归一化后的 mass 作为采样概率
+            idx = rng.choice(np.arange(X_pred.shape[0]), size=min(Edistance_sample_num, X_pred.shape[0]), replace=True, p=m_pred_weights)
             X_pred_rs = X_pred[idx]
-            e_vals.append(
-                compute_edistance_torch(X_true, X_pred_rs,max_n=Edistance_sample_num, seed=seed)
-            )
+            e_vals.append(compute_edistance_torch(X_true, X_pred_rs, max_n=Edistance_sample_num, seed=seed))
         
         row['e_distance'] = np.mean(e_vals)
         row['e_distance_std'] = np.std(e_vals)
 
-        # PCC delta
+        # PCC delta (基于精确对齐的 mean_ctrl)
         delta_true = mean_true - mean_ctrl
         delta_pred = mean_pred - mean_ctrl
         if np.std(delta_true) == 0 or np.std(delta_pred) == 0:
-            pcc_delta = 0.0
-            spearman_delta = 0.0
+            row['pcc_delta'] = 0.0
+            row['spearman_delta'] = 0.0
         else:
-            pcc_delta, _ = pearsonr(delta_true, delta_pred)
-            spearman_delta, _ = spearmanr(delta_true, delta_pred)
-        row['pcc_delta'] = pcc_delta
-        row['spearman_delta'] = spearman_delta
+            row['pcc_delta'], _ = pearsonr(delta_true, delta_pred)
+            row['spearman_delta'], _ = spearmanr(delta_true, delta_pred)
 
-        # mass change
+        # 记录修正后的群体增殖对比
         row['m_true_change'] = m_true_change
         row['m_pred_change'] = m_pred_change
 
         metrics_list.append(row)
 
     df = pd.DataFrame(metrics_list)
-    mean_row = df.drop(columns=['perturbation']).mean(numeric_only=True).to_dict()
-    mean_row['perturbation'] = 'mean'
-    df = pd.concat([df, pd.DataFrame([mean_row])], ignore_index=True)
+    if not df.empty:
+        mean_row = df.drop(columns=['perturbation']).mean(numeric_only=True).to_dict()
+        mean_row['perturbation'] = 'mean'
+        df = pd.concat([df, pd.DataFrame([mean_row])], ignore_index=True)
 
     return df
+
+
 
 
 
@@ -511,43 +576,33 @@ def evaluate_population_distribution(
     n_bins=50,
     top_n_degs=200,
     seed=42,
+    rulebook=None,                    # 【新增】
+    use_groupwise_control=True        # 【新增】
 ):
-    """
-    对每个 perturbation 计算：
-      - wasserstein_mean：按基因的一维 Wasserstein 距离平均
-      - kl_mean：按基因的 KL(P||Q) 平均（P=true, Q=pred）
-      - common_degs：|TopDEG_true ∩ TopDEG_pred| / top_n_degs
-    """
-
-    
     rng = np.random.default_rng(seed)
     metrics_list = []
-
-    # 选基因子集
     gene_idx = np.arange(adata_control.shape[1])
 
     pert_names = list(results_genes.keys())
     print(f"Start evaluating {len(pert_names)} perturbations (Distribution metrics)")
 
-    
-
     for pert in pert_names:
         row = {"perturbation": pert}
 
-        # true pert cells
         adata_true_pert = adata_treated[adata_treated.obs[pert_key] == pert]
         if adata_true_pert.n_obs == 0:
             print(f"{pert} no observation")
             continue
 
-        adata_pred_pert = results_genes[pert]
+        # 【核心修改】：获取精准 Control 供给后续 DEG 差异计算
+        curr_ctrl = _get_matched_control(adata_control, pert, rulebook, use_groupwise_control)
 
+        adata_pred_pert = results_genes[pert]
         n_true = adata_true_pert.n_obs
         n_pred = adata_pred_pert.n_obs
 
         idx_true = rng.choice(n_true, size=min(max_cells, n_true), replace=False)
 
-        # pred 使用 mass 做加权重采样（若没有 mass，则均匀采样）
         if "mass" in adata_pred_pert.obs.columns:
             w = _normalize_weights(adata_pred_pert.obs["mass"].values)
         else:
@@ -561,8 +616,7 @@ def evaluate_population_distribution(
         X_true = adata_to_numpy(adata_true_pert[idx_true].X)[:, gene_idx]
         X_pred = adata_to_numpy(adata_pred_pert[idx_pred].X)[:, gene_idx]
 
-        # Wasserstein + KL
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = 'cuda' if torch.cuda.is_available() else'cpu'
         
         w1_vals, kl_vals = compute_metrics_batch_unequal(
             X_true, X_pred, n_bins=n_bins, n_quantiles=100, device=device
@@ -574,22 +628,22 @@ def evaluate_population_distribution(
         row["kl_std"]           = float(np.nanstd(kl_vals))
 
         # ---- Common-DEGs ----
-        # 预测 DEGs：用 idx_pred 的重采样子集（把 mass 体现进来）
         adata_pred_rs = adata_pred_pert[idx_pred].copy()
 
-        # 注意：DEG 这里用原始 adata_control（你也可以改成 control 下采样）
-        true_top = _rank_degs_top_names_fast(adata_true_pert, adata_control, top_n=top_n_degs)
-        pred_top = _rank_degs_top_names_fast(adata_pred_rs,   adata_control, top_n=top_n_degs)
+        # 【使用 curr_ctrl 计算 T-test】
+        true_top = _rank_degs_top_names_fast(adata_true_pert, curr_ctrl, top_n=top_n_degs)
+        pred_top = _rank_degs_top_names_fast(adata_pred_rs, curr_ctrl, top_n=top_n_degs)
 
         overlap = len(set(true_top).intersection(set(pred_top)))
-        row["common_degs"] = overlap / float(top_n_degs)
+        row["common_degs"] = overlap / float(top_n_degs) if top_n_degs > 0 else 0.0
 
         metrics_list.append(row)
 
     df = pd.DataFrame(metrics_list)
-    mean_row = df.drop(columns=['perturbation']).mean(numeric_only=True).to_dict()
-    mean_row['perturbation'] = 'mean'
-    df = pd.concat([df, pd.DataFrame([mean_row])], ignore_index=True)
+    if not df.empty:
+        mean_row = df.drop(columns=['perturbation']).mean(numeric_only=True).to_dict()
+        mean_row['perturbation'] = 'mean'
+        df = pd.concat([df, pd.DataFrame([mean_row])], ignore_index=True)
 
     return df
 

@@ -5,59 +5,47 @@ from sklearn.neighbors import KNeighborsClassifier
 import seaborn as sns
 
 
+from .evals_new import _get_matched_control
+
 def check_population_shift(
     adata_train,
     adata_control,
-    target_cytokines,
+    condition_combined_key, 
     cell_type_key="cell_type",
-    perturb_key="cytokine",
-    control_name="PBS",
-    label_threshold=0.03
+    control_tuple_name="('PBS', 'control')" 
 ):
-    # train: 保留原始 cytokine
-    train_obs = adata_train.obs[[perturb_key, cell_type_key]].copy()
-    train_obs["condition"] = train_obs[perturb_key].astype(str)
-
-    # control: 全部设成 PBS
-    control_obs = adata_control.obs[[cell_type_key]].copy()
-    control_obs["condition"] = control_name
-
-    # 合并
-    combined_obs = pd.concat([
-        train_obs[["condition", cell_type_key]],
-        control_obs[["condition", cell_type_key]]
-    ], axis=0)
-
-    # target_cytokines 可能是 Categorical
-    all_conditions = list(target_cytokines)
-    all_conditions.append(control_name)
-    all_conditions = list(dict.fromkeys(all_conditions))  # 去重
-
-    # 只保留目标条件
-    combined_obs = combined_obs[combined_obs["condition"].isin(all_conditions)]
-
+    """
+    对比控制组与训练组的细胞群体分布漂移，全面支持 Tuple 标识。
+    """
+    # 提取 obs 并统一列名
+    train_obs = adata_train.obs[[condition_combined_key, cell_type_key]].copy()
+    control_obs = adata_control.obs[[condition_combined_key, cell_type_key]].copy()
+    
+    # 合并数据
+    combined_obs = pd.concat([train_obs, control_obs], axis=0)
+    
     # 统计绝对数量
-    counts = combined_obs.groupby(["condition", cell_type_key]).size().unstack(fill_value=0)
-
-    # 按指定顺序重排
-    counts = counts.reindex(all_conditions, fill_value=0)
-
+    counts = combined_obs.groupby([condition_combined_key, cell_type_key]).size().unstack(fill_value=0)
+    
     # 统计相对比例
     fractions = counts.div(counts.sum(axis=1), axis=0)
 
     print("=== 细胞绝对数量 ===")
     print(counts)
-
     print("\n=== 细胞相对比例 ===")
     print(fractions)
 
-    fig, ax = plt.subplots(figsize=(12, 16))
-
-    fractions.plot(kind="barh", stacked=True, ax=ax)
+    # 绘图优化：简化过长的 Tuple 标签
+    plot_labels = [str(idx) if len(str(idx)) < 25 else str(idx)[:22]+"..." for idx in fractions.index]
     
-    ax.set_title("Cell Type Composition Shift")
+    fig, ax = plt.subplots(figsize=(12, max(6, len(fractions) * 0.5))) 
+    
+    fractions.plot(kind="barh", stacked=True, ax=ax)
+    ax.set_yticklabels(plot_labels) # 使用简化标签
+    
+    ax.set_title("Cell Type Composition Shift (Multi-Covariate)", fontsize=14)
     ax.set_xlabel("Fraction")
-    ax.set_ylabel("Condition")
+    ax.set_ylabel("Condition Tuple")
     
     label_threshold = 0.08
     
@@ -65,15 +53,11 @@ def check_population_shift(
         left = 0
         for cell_type in fractions.columns:
             frac_value = fractions.loc[condition, cell_type]
-    
             if frac_value >= label_threshold:
                 ax.text(
-                    left + frac_value / 2,
-                    i,
+                    left + frac_value / 2, i,
                     f"{frac_value:.0%}",
-                    ha="center",
-                    va="center",
-                    fontsize=8
+                    ha="center", va="center", fontsize=8
                 )
             left += frac_value
     
@@ -81,186 +65,219 @@ def check_population_shift(
     plt.tight_layout()
     plt.show()
 
-
     return counts, fractions
 
 
 
 def extract_v_and_g_metrics(
     inference_results,
-    z0_tensor,
-    adata_source,
+    adata_source,         # 传入包含 sample_rep 的 AnnData
+    rulebook, 
+    sample_rep="X_pca_scaled", # 新增：指明 latent 空间名字
     cell_type_key="cell_type",
     n_neighbors=15,
-    knn_weights="distance"
+    knn_weights="distance",
+    use_groupwise_control=True # 新增：兼容精准 Control 匹配
 ):
     """
-    inference_results: dict
-        每个 condition 对应一个结果字典，至少包含:
-        - 'z_pred': [N_cells, embedding_dim]
-        - 'm_pred': [N_cells] or [N_cells, 1]
-
-    z0_tensor:
-        输入给模型的初始状态 [N_cells, embedding_dim]，这里也作为 KNN reference 的 PCA 空间坐标
-
-    adata_source:
-        控制组 AnnData，用来提取 reference 的 cell type 标签。
-        默认假设它和 z0_tensor 的顺序一一对应。
-
-    cell_type_key:
-        adata_source.obs 里的细胞类型列名
-
-    n_neighbors:
-        KNN 邻居数
-
-    knn_weights:
-        'uniform' 或 'distance'
+    提取预测结果的速度(v)和质量(g)变化，并将 Tuple 字符串拆解为独立特征列。
     """
     metrics_list = []
 
-    # reference embedding: 初始细胞在 PCA 空间的位置
-    z0_np = z0_tensor.cpu().numpy() if hasattr(z0_tensor, "cpu") else np.asarray(z0_tensor)
-
-    # reference labels
-    ref_cell_types = adata_source.obs[cell_type_key].values
-
-    # 训练 KNN 分类器：用初始 control/reference 细胞作为 reference
+    # 1. 训练全局 KNN 分类器 (用全局数据训练，视野最广)
+    z0_global_np = adata_source.obsm[sample_rep]
+    ref_cell_types_global = adata_source.obs[cell_type_key].values
+    
     knn = KNeighborsClassifier(
         n_neighbors=n_neighbors,
         weights=knn_weights,
         metric="euclidean"
     )
-    knn.fit(z0_np, ref_cell_types)
+    knn.fit(z0_global_np, ref_cell_types_global)
 
-    for cond, res in inference_results.items():
+    for cond_tuple_str, res in inference_results.items():
         z_pred = res["z_pred"]
         m_pred = res["m_pred"].flatten()
-
-        # 如果 z_pred 是 tensor，转 numpy
         z_pred_np = z_pred.cpu().numpy() if hasattr(z_pred, "cpu") else np.asarray(z_pred)
 
-        # 1. 计算状态转变距离 v
-        distance = np.linalg.norm(z_pred_np - z0_np, axis=1)
+        # ---------------------------------------------------------
+        # 【核心修复】：获取与当前 z_pred 精准匹配的起始细胞 z0
+        # ---------------------------------------------------------
+        # 方案 A：如果在 run_batch_inference 已经存了，直接用
+        if'z0_used' in res and'obs_names' in res:
+            z0_np = res['z0_used']
+            curr_obs_names = res['obs_names']
+            # 从全局拿到对应的 origin cell types
+            curr_origin_ct = adata_source[curr_obs_names].obs[cell_type_key].values
+        
+        # 方案 B：如果没存，使用法典动态复原切片
+        else:
+            curr_ctrl = _get_matched_control(adata_source, cond_tuple_str, rulebook, use_groupwise_control)
+            z0_np = curr_ctrl.obsm[sample_rep]
+            curr_obs_names = curr_ctrl.obs_names
+            curr_origin_ct = curr_ctrl.obs[cell_type_key].values
 
-        # 2. 计算质量变化 g
-        log2_mass = np.log2(m_pred + 1e-6)
+        # 安全检查：确保维度完美对齐
+        if len(z_pred_np) != len(z0_np):
+            print(f"⚠️ 跳过 {cond_tuple_str}: 预测细胞数({len(z_pred_np)})与起始细胞数({len(z0_np)})不匹配！")
+            continue
+        # ---------------------------------------------------------
+
+        # 2. 计算状态转变距离 v (现在维度严格一致了)
+        distance = np.linalg.norm(z_pred_np - z0_np, axis=1)
 
         # 3. 用 KNN 在 PCA 空间里给预测后状态重新判 cell type
         pred_cell_type = knn.predict(z_pred_np)
+        pred_confidence = knn.predict_proba(z_pred_np).max(axis=1)
 
-        # 4. 可选：输出 KNN 置信度（最大类别概率）
-        pred_prob = knn.predict_proba(z_pred_np)
-        pred_confidence = pred_prob.max(axis=1)
-
+        # 4. 组装 DataFrame (维度严格一致)
         df = pd.DataFrame({
-            "cell_id": adata_source.obs_names,
-            "cell_type": adata_source.obs[cell_type_key].values,   # 原始/起始 cell type
-            "pred_cell_type": pred_cell_type,                      # 新增：KNN 判定的预测后 cell type
-            "pred_cell_type_conf": pred_confidence,                # 可选：KNN 置信度
-            "condition": cond,
-            "distance_v": distance,
-            "log2_mass_g": log2_mass,
+            "cell_id": curr_obs_names,
+            "origin_cell_type": curr_origin_ct,
+            "pred_cell_type": pred_cell_type,
+            "pred_cell_type_conf": pred_confidence,
+            "condition_tuple": cond_tuple_str,
+            "distance_v": distance,             
             "mass_m": m_pred
         })
+        
+        # 5. 将 Tuple 拆解回原始协变量
+        try:
+            tuple_vals = eval(cond_tuple_str)
+            schema = rulebook.get("condition_tuple_schema", [])
+            for i, col_name in enumerate(schema):
+                if i < len(tuple_vals):
+                    df[col_name] = tuple_vals[i]
+        except Exception as e:
+            pass
+            
         metrics_list.append(df)
 
+    if not metrics_list:
+        return pd.DataFrame()
+        
     return pd.concat(metrics_list, ignore_index=True)
 
 
 
-def plot_predicted_mass_by_celltype(df_metrics, condition_name, target_cell_types):
+
+
+
+def plot_predicted_mass_by_celltype(df_metrics, target_tuple_str, target_cell_types):
     """
-    df_metrics: 是我们上一步用 extract_v_and_g_metrics 提取的 DataFrame
-    condition_name: 比如 'IFN-beta'
-    target_cell_types: 我们重点关注的细胞，比如 ['NKT', 'cDC', 'CD14 Mono', 'B Naive']
+    绘制特定 Tuple 条件下的预测 Mass 变化小提琴图。
     """
-    # 筛选特定条件和特定细胞类型的预测结果
-    df_cond = df_metrics[(df_metrics['condition'] == condition_name) & 
-                         (df_metrics['cell_type'].isin(target_cell_types))]
+    # 筛选特定条件和特定细胞类型
+    df_cond = df_metrics[(df_metrics['condition_tuple'] == target_tuple_str) & 
+                         (df_metrics['pred_cell_type'].isin(target_cell_types))]
     
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(12, 6))
     
-    # 画小提琴图展示 m_pred 的分布
-    sns.violinplot(data=df_cond, x='cell_type', y='mass_m', 
+    # 画小提琴图
+    sns.violinplot(data=df_cond, x='pred_cell_type', y='mass_m', 
                    inner="quartile", palette="Set2", order=target_cell_types)
-    plt.xticks(rotation=45) 
+    plt.xticks(rotation=45, ha='right') 
     
-    # 画一条 m=1 的红线（代表不增不减）
+    # 画一条 m=1 的红线
     plt.axhline(1.0, color='red', linestyle='--', linewidth=2, label='Mass Conservation (m=1)')
-    
         
-    plt.title(f'Predicted Mass Dynamics ($m_{{pred}}$) under {condition_name} Perturbation', fontsize=16)
+    plt.title(f'Predicted Mass Dynamics under\n{target_tuple_str}', fontsize=14)
     plt.ylabel('Predicted Mass ($m_{pred}$)', fontsize=14)
-    plt.xlabel('Cell Type', fontsize=14)
+    plt.xlabel('Predicted Cell Type', fontsize=14)
     plt.legend()
     plt.tight_layout()
     plt.show()
 
 
-
-def plot_predicted_mass_with_true_label(df_metrics, condition_name, target_cell_types,adata_control, adata_full, cytokine_key="cytokine", cell_type_key="cell_type"):
+def plot_predicted_mass_with_true_label(
+    df_metrics, 
+    target_tuple_str, 
+    target_cell_types,
+    adata_control, 
+    adata_full, 
+    rulebook=None,                           # 【新增】传入法典以匹配精准 Control
+    use_groupwise_control=True,              # 【新增】控制开关
+    condition_combined_key="condition_combined",
+    cell_type_key="cell_type",
+    mass_deduct_keys=None                    # 【核心修复】动态孔数计算键名 (e.g., 'plate_well')
+):
     """
-    df_metrics: 提取出的包含 m_pred 的 DataFrame
-    condition_name: 当前扰动名称 (e.g., 'IL-11')
-    target_cell_types: 关注的细胞类型列表
-    adata_full: 包含 PBS 和所有扰动真实数据的 AnnData (adata_train / adata_test)
+    对比模型预测的 Mass 与真实的群体扩增/死亡率。
+    引入了 Groupwise Control 匹配和动态孔数(Well)密度校准，彻底消除硬编码。
     """
     # 1. 筛选特定条件和特定细胞类型的预测结果
-    df_cond = df_metrics[(df_metrics['condition'] == condition_name) & 
+    df_cond = df_metrics[(df_metrics['condition_tuple'] == target_tuple_str) & 
                          (df_metrics['pred_cell_type'].isin(target_cell_types))]
     
     if df_cond.empty:
-        print(f"No prediction data for {condition_name}")
+        print(f"⚠️ 警告: 没有找到条件 {target_tuple_str} 的预测数据！")
         return
 
-    # 2. 计算真实的存活/扩增率 (True Mass Ratio)
-    # 获取 PBS 的真实数量 (记得除以 6 作为期望基线)
-    pbs_subset = adata_control
-    pbs_counts = pbs_subset.obs[cell_type_key].value_counts() / 6.0
-    
-    # 获取当前 Perturbation 的真实数量
-    pert_subset = adata_full[adata_full.obs[cytokine_key] == condition_name]
+    # 2. 获取真实的 Pert 数据
+    pert_subset = adata_full[adata_full.obs[condition_combined_key] == target_tuple_str]
     pert_counts = pert_subset.obs[cell_type_key].value_counts()
     
-    # 计算每种细胞的 True Mass (真实数量 / 期望数量)
+    # 3. 获取精准匹配的 Control 数据 (替代原先粗暴的 adata_control 全集)
+    curr_ctrl = _get_matched_control(adata_control, target_tuple_str, rulebook, use_groupwise_control)
+    ctrl_counts = curr_ctrl.obs[cell_type_key].value_counts()
+    
+    # 4. 【核心修复】：动态计算孔数密度 (Cells per well)
+    if mass_deduct_keys is not None and mass_deduct_keys in pert_subset.obs and mass_deduct_keys in curr_ctrl.obs:
+        n_pert_wells = len(pert_subset.obs[mass_deduct_keys].unique())
+        n_ctrl_wells = len(curr_ctrl.obs[mass_deduct_keys].unique())
+    else:
+        n_pert_wells = 1.0
+        n_ctrl_wells = 1.0
+        if mass_deduct_keys is not None:
+            print(f"⚠️ 警告: 列名 {mass_deduct_keys} 不存在，已回退到绝对细胞数对比。")
+        
+    # 防止除以 0 导致崩溃
+    n_pert_wells = max(1.0, float(n_pert_wells))
+    n_ctrl_wells = max(1.0, float(n_ctrl_wells))
+
+    # 计算密度的期望值 (细胞数 / 孔数)
+    pert_density = pert_counts / n_pert_wells
+    ctrl_density = ctrl_counts / n_ctrl_wells
+    
     true_mass_dict = {}
     for ct in target_cell_types:
-        expected_n = pbs_counts.get(ct, 0)
-        actual_n = pert_counts.get(ct, 0)
-        if expected_n > 0: # 过滤掉极少量的噪点细胞
+        expected_n = ctrl_density.get(ct, 0)
+        actual_n = pert_density.get(ct, 0)
+        
+        # 只有在 Control 组存在该细胞类型时，计算倍数才有意义
+        if expected_n > 0: 
             true_mass_dict[ct] = actual_n / expected_n
         else:
-            true_mass_dict[ct] = np.nan # 数量太少，不计算真实变化
+            true_mass_dict[ct] = np.nan
             
-    # 3. 开始画图
-    plt.figure(figsize=(12, 6)) # 稍微加宽一点，防止拥挤
+    # 5. 开始画图
+    plt.figure(figsize=(12, 6))
     
-    # 画小提琴图展示 m_pred 的分布
+    # 画小提琴图 (模型预测的 m)
     ax = sns.violinplot(data=df_cond, x='pred_cell_type', y='mass_m', 
                         inner="quartile", palette="Set2", order=target_cell_types)
     plt.xticks(rotation=45, ha='right') 
-    
-    # 画一条 m=1 的红线（代表不增不减）
     plt.axhline(1.0, color='red', linestyle='--', linewidth=2, label='Mass Conservation (m=1)')
     
-    # 4. 叠加 True Mass (真实的星星标签)
+    # 6. 叠加 True Mass (真实的星星标签)
     x_coords = np.arange(len(target_cell_types))
     y_coords = [true_mass_dict[ct] for ct in target_cell_types]
     
+    # 散点图画星星
     plt.scatter(x_coords, y_coords, color='black', marker='*', s=200, zorder=5, 
-                edgecolor='white', linewidth=1, label='True Absolute Change ($\star$)')
+                edgecolor='white', linewidth=1, label='True Mass Multiplier ($\star$)')
     
-    # 画线连接这些星星，方便看出真实的趋势
+    # 把有效的星星用虚线连起来，方便观察趋势
     valid_idx = [i for i, y in enumerate(y_coords) if not np.isnan(y)]
     valid_x = [x_coords[i] for i in valid_idx]
     valid_y = [y_coords[i] for i in valid_idx]
     plt.plot(valid_x, valid_y, color='black', linestyle=':', linewidth=1.5, alpha=0.5, zorder=4)
         
-    plt.title(f'Predicted vs True Mass Dynamics under {condition_name} Perturbation', fontsize=16)
+    plt.title(f'Predicted vs True Mass Dynamics\nCondition: {target_tuple_str}', fontsize=14)
     plt.ylabel('Mass Multiplier ($m$)', fontsize=14)
     plt.xlabel('Cell Type', fontsize=14)
     
-    # 调整图例
+    # 优化图例位置，防止挡住数据
     plt.legend(loc='upper right', bbox_to_anchor=(1, 1))
-    plt.tight_layout()
+    plt.tight_layout()     
     plt.show()

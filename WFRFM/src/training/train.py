@@ -6,6 +6,7 @@ import os
 
 import numpy as np
 
+# 假设这俩已经在同级或对应的模块中定义好了
 from .data import get_batch
 from .data import DataLoaderHelper
 
@@ -14,12 +15,11 @@ def train_model(adata_control, adata_treated, adata_test,
                 ot_results_train, ot_results_test,
                 model,
                 optimizer,
-                cov_config, # 新增：传入协变量配置
                 scheduler=None,
                 n_iterations=10000,
                 batch_size_per_condition=256,
                 batch_size_condition=10,
-                sample_rep="X_pca_scaled", # X_ae; X_state
+                sample_rep="X_pca_scaled", 
                 condition_rep_keys="gene_embeddings",
                 device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                 save_path=None,
@@ -27,9 +27,9 @@ def train_model(adata_control, adata_treated, adata_test,
                 save_interval=5000,
                 save_only_last=False):
     
+
     train_loader = DataLoaderHelper(
         adata_control, adata_treated, ot_results_train,
-        cov_config=cov_config, # 传入配置
         sample_rep=sample_rep,
         condition_rep_keys=condition_rep_keys
     )
@@ -38,7 +38,6 @@ def train_model(adata_control, adata_treated, adata_test,
     if adata_test is not None and ot_results_test is not None:
         test_loader = DataLoaderHelper(
             adata_control, adata_test, ot_results_test,
-            cov_config=cov_config,
             sample_rep=sample_rep,
             condition_rep_keys=condition_rep_keys
         )
@@ -51,7 +50,7 @@ def train_model(adata_control, adata_treated, adata_test,
         model.train()
         optimizer.zero_grad()
         
-        # 返回值变更为 cov_dict
+        # 完美接收重构后 get_batch 吐出的 cov_dict
         t, xt, ut, gt, masst, cons, cov_dict = get_batch(
             helper=train_loader,
             batch_size_per_condition=batch_size_per_condition,
@@ -60,7 +59,7 @@ def train_model(adata_control, adata_treated, adata_test,
             device=device
         )
 
-        # 传入 cov_dict 替代原来的 donor
+        # 协变量字典直接喂给模型
         vt, gt_pred = model(t, xt, cons, cov_dict)
 
         vloss = torch.mean((vt - ut)**2 * masst)
@@ -102,6 +101,7 @@ def train_model(adata_control, adata_treated, adata_test,
                                               "gloss": f"{gloss.item():.3f}", "test_loss": f"{test_loss.item():.3f}"
                                              , "test_vloss":f"{test_vloss.item():.3f}", "test_gloss":f"{test_gloss.item():.3f}"})
         
+        # 保存 Checkpoint 逻辑保持不变...
         if (i+1) % save_interval == 0:
             if save_path is not None:
                 ckpt_path = f"{save_path}_epoch_{i+1}.pt"
@@ -125,8 +125,13 @@ def train_model(adata_control, adata_treated, adata_test,
                         pass
                 last_ckpt_path = ckpt_path
 
-
-    if save_path is not None:
+    # 最终保存逻辑保持不变...
+    if save_path is not None and n_iterations%save_interval!=0:
+        if last_ckpt_path is not None and os.path.isfile(last_ckpt_path) and save_only_last:
+            try:
+                os.remove(last_ckpt_path)
+            except OSError:
+                pass
         ckpt_path = f"{save_path}_epoch_{i+1}.pt"
         torch.save({
             'model_state_dict': model.state_dict(),
@@ -141,10 +146,6 @@ def train_model(adata_control, adata_treated, adata_test,
         }, ckpt_path)
         logging.info(f"Model and training state saved to {ckpt_path}")
 
-        if last_ckpt_path is not None and os.path.isfile(last_ckpt_path) and save_only_last:
-            try:
-                os.remove(last_ckpt_path)
-            except OSError:
-                pass
-        last_ckpt_path = ckpt_path
+        
 
+    return model # 顺手加个 return 方便外部调用
