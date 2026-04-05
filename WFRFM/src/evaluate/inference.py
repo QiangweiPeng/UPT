@@ -196,6 +196,10 @@ def batch_reconstruct_pca(
         # z_pca = z_pca_scaled * scale_factor
         z_pca = result_dict['z_pred']
         X_recon = np.dot(z_pca, PCs.T) + mean
+
+        X_recon = np.nan_to_num(X_recon, nan=0.0, posinf=0.0, neginf=0.0)
+        X_recon = np.maximum(X_recon, 0.0)
+
         
         if store_as_anndata:
             # 包装成 AnnData

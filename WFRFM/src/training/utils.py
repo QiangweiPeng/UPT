@@ -11,6 +11,61 @@ import random
 import pandas as pd 
 
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+
+def draw_wfr_evaluation(res_G, a_np, b_np, sum_1, sum_0):
+    """
+    针对单细胞 WFR-OT 的参数评估绘图
+    """
+    # 1. 计算源细胞的“增殖潜力” (Source Growth Potential)
+    # 物理意义：松弛矩阵试图从细胞 i 抽取的总质量 / 细胞 i 实际拥有的质量
+    # > 1 表示细胞倾向于增殖； < 1 表示细胞倾向于凋亡
+    source_growth_potential = sum_1.squeeze() / a_np
+    
+    # 2. 计算目标细胞的“接收比例” (Target Supply Ratio)
+    # 物理意义：松弛矩阵送到细胞 j 的总质量 / 细胞 j 实际需要的质量
+    # 这个值反映了目标状态的"生成难度"
+    target_supply_ratio = sum_0.squeeze() / b_np
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    
+    # --- 图 1：源细胞增殖潜力的直方图 ---
+    sns.histplot(source_growth_potential, bins=50, kde=True, ax=axes[0], color='skyblue')
+    axes[0].axvline(1.0, color='red', linestyle='--', label='Mass Conservation (Ratio=1)')
+    axes[0].set_title("Source Growth Potential Distribution")
+    axes[0].set_xlabel("Predicted Growth Ratio (Sum_out / Original_mass)")
+    axes[0].set_ylabel("Number of Cells")
+    axes[0].legend()
+    
+    # --- 图 2：目标细胞接收比例的直方图 ---
+    sns.histplot(target_supply_ratio, bins=50, kde=True, ax=axes[1], color='lightcoral')
+    axes[1].axvline(1.0, color='red', linestyle='--', label='Perfect Supply (Ratio=1)')
+    axes[1].set_title("Target Supply Ratio Distribution")
+    axes[1].set_xlabel("Supply Ratio (Sum_in / Target_mass)")
+    axes[1].set_ylabel("Number of Cells")
+    axes[1].legend()
+
+    # --- 图 3：传输矩阵的稀疏度 (Transport Plan Sparsity) ---
+    # 取前 500 个细胞的子图看局部的传输密集度（防止点太多糊成一团）
+    subset_size = min(100, res_G.shape[0], res_G.shape[1])
+    im = axes[2].imshow(res_G[:subset_size, :subset_size], cmap='viridis', aspect='auto')
+    axes[2].set_title(f"Local Transport Plan (First {subset_size} cells)")
+    axes[2].set_xlabel("Target Cells")
+    axes[2].set_ylabel("Source Cells")
+    fig.colorbar(im, ax=axes[2])
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # 打印核心统计指标，用于自动化调参参考
+    print(f"--- WFR Transport Metrics ---")
+    print(f"Mean Growth Ratio : {np.mean(source_growth_potential):.4f}")
+    print(f"Max Growth Ratio  : {np.max(source_growth_potential):.4f} (Extreme Proliferation?)")
+    print(f"Min Growth Ratio  : {np.min(source_growth_potential):.4f} (Extreme Apoptosis?)")
+
+
 
     
 
@@ -31,6 +86,9 @@ def compute_uot_plan_gpu(X_source, X_target,m_source=1,m_target=1, delta=1, reg_
 
         def get_cost_batch(xs, xt):
             dist = torch.cdist(xs, xt, p=2) 
+            if draw:
+                print(f"Dist Mean: {dist.mean().item():.2f}, Dist Max: {dist.max().item():.2f}")
+                print(f"Clamp ratio hit pi/2: {(dist / (2 * delta) >= np.pi/2).float().mean().item() * 100:.2f}%")
             
             limit = torch.tensor(np.pi/2, device=device)
             term = torch.clamp(dist / (2 * delta), max=limit)
@@ -47,6 +105,9 @@ def compute_uot_plan_gpu(X_source, X_target,m_source=1,m_target=1, delta=1, reg_
             cost_matrix = get_cost_batch(X_source, X_target)
             G = ot.unbalanced.mm_unbalanced(a, b, cost_matrix, reg_m=reg_m, numItermax=1000)
             res_G = G.cpu().numpy()
+
+            if draw:
+                print(f"res_G Mean: {res_G.mean():.6f}, Max: {res_G.max():.6f}")
             del cost_matrix, G
         else:
             res_G = np.zeros((n_source, n_target), dtype=np.float32) #直接放cpu上
@@ -91,30 +152,9 @@ def compute_uot_plan_gpu(X_source, X_target,m_source=1,m_target=1, delta=1, reg_
 
 
         if draw:
-            import matplotlib.pyplot as plt
-            source_pred = res_G.sum(axis=1)  # (n_source,)
-            target_pred = res_G.sum(axis=0)  # (n_target,)
-            
-            sum1_flat = sum_1.squeeze(1)
-            sum0_flat = sum_0.squeeze(0)
-    
-            fig = plt.figure(figsize=(15, 5))
-            
-            # 绘制 Source 侧
-            plt.subplot(121)
-            plt.plot(a_np, label='Target (m_source)', color='blue', alpha=0.6)
-            plt.plot(sum1_flat, label='Pred (sum_i_give)', color='orange', alpha=0.6, linestyle='--')
-            plt.title(f"Source Marginals (MSE: {np.mean((a_np - sum1_flat)**2):.4f})")
-            plt.legend()
-        
-            # 绘制 Target 侧
-            plt.subplot(122)
-            plt.plot(b_np, label='Target (m_target)', color='blue', alpha=0.6)
-            plt.plot(sum0_flat, label='Pred (sum_j_receive)', color='orange', alpha=0.6, linestyle='--')
-            plt.title(f"Target Marginals (MSE: {np.mean((b_np - sum0_flat)**2):.4f})")
-            plt.legend()
-    
-            plt.show()
+            draw_wfr_evaluation(res_G, a_np, b_np, sum_1, sum_0)
+            print(f"true_m_change:{n_target*m_target/n_source/m_source}")
+            print()
     
 
     del X_source, X_target

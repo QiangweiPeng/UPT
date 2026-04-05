@@ -191,11 +191,240 @@ def classify_perturbations(train_conds, test_conds, ctrl_tag='ctrl'):
     return results, train_genes_vocab
 
 
+    
+
+
+import os
+import numpy as np
+import scvi
+
+def run_inference_and_reconstruct(
+    *,
+    model,
+    adata_control,
+    adata_test,
+    wishlist,
+    condition_keys,
+    condition_rep_keys,
+    sample_rep,
+    device,
+    n_particles: int = 10000,
+    random_seed: int = 42,
+    n_steps: int = 50,
+    scvi_model_load_path: str = None,
+    state_model_load_path: str = None,
+):
+    """
+    模块一：执行采样、模型推理(Latent Space)以及基因表达重建。
+    返回包含预测 Latent 和预测 Genes 的数据字典。
+    """
+    if not wishlist:
+        print("wishlist is empty")
+        return None, None
+
+    # ---- 1. 解析法典与构建 Embedding 字典 ----
+    rulebook = adata_test.uns.get('global_rulebook')
+    if rulebook is None:
+        raise ValueError("adata_test.uns 缺少 'global_rulebook'。请先运行 prepare_covariates。")
+
+    condition_embeddings = {}
+    for adata in [adata_control, adata_test]:
+        if condition_rep_keys in adata.obsm:
+            for pert in adata.obs[condition_keys].unique():
+                if pert not in condition_embeddings:
+                    idx = np.where(adata.obs[condition_keys] == pert)[0][0]
+                    condition_embeddings[pert] = adata.obsm[condition_rep_keys][idx]
+
+    # ---- 2. 采样起点细胞 X_0 ----
+    all_indices = np.arange(adata_control.n_obs)
+    rng = np.random.default_rng(random_seed)
+    indices = (
+        rng.choice(all_indices, n_particles, replace=False)
+        if n_particles < len(all_indices)
+        else all_indices
+    )
+    adata_source_subset = adata_control[indices].copy()
+
+    # ---- 3. Inference (Latent Space) ----
+    print(f"Starting inference for {len(wishlist)} conditions...")
+    results_embedding = run_batch_inference(
+        model=model,
+        adata_source=adata_source_subset,
+        rulebook=rulebook,
+        wishlist=wishlist,
+        condition_embeddings=condition_embeddings,
+        condition_key_name=condition_keys,
+        sample_rep=sample_rep,
+        n_steps=n_steps,
+        device=device
+    )
+
+    # ---- 4. Reconstruct (Gene Expression) ----
+    print("Starting gene expression reconstruction...")
+    results_genes = None
+
+    if sample_rep in ["X_pca_scaled", "X_pca"]:
+        results_genes = batch_reconstruct_pca(
+            inference_results=results_embedding,  
+            ref_adata=adata_control        
+        )
+    elif sample_rep in ["X_scVI"]:
+        model_ref = scvi.model.SCVI.load(f"{scvi_model_load_path}_ref", adata=adata_control)
+        results_genes = batch_reconstruct_scvi(
+            inference_results=results_embedding,
+            scvi_model=model_ref,  
+            target_library_size=1e4, 
+            batch_idx=None, 
+        )
+    elif sample_rep == "X_flatvi":
+        model_ref = scvi.model.SCVI.load(f"{scvi_model_load_path}_ref", adata=adata_control)
+        results_genes = batch_reconstruct_flatvi(
+            inference_results=results_embedding,
+            flatvi_model=model_ref,
+            target_library_size=1e4,
+            var_names=adata_control.var_names
+        )
+    elif sample_rep == "X_state":
+        from src.preprocessing import NBDecoder, NBDecoderTrainer
+        z_dim = adata_control.obsm["X_state"].shape[1]
+        n_genes = adata_control.n_vars
+        state_decoder = NBDecoder(z_dim=z_dim, n_genes=n_genes, hidden=(1024,2048,4096), dropout=0.1)
+        trainer = NBDecoderTrainer(state_decoder, device=device, use_amp=False)
+        trainer.load(state_model_load_path)  
+        state_decoder = trainer.decoder
+        state_decoder.eval()
+        
+        results_genes = batch_reconstruct_state(
+            inference_results=results_embedding,
+            state_decoder=state_decoder,
+            target_library_size=1e4,
+            var_names=adata_control.var_names
+        )
+
+    print("Inference and reconstruction completed.")
+    return results_embedding, results_genes, indices
+
+
+import numpy as np
+import pandas as pd
+
+
+def _get_summary_base_df(df):
+    """
+    只保留原始 perturbation 行，避免把已有的 mean / mean_xxx 行再次纳入汇总。
+    """
+    out = df.copy()
+
+    if "perturbation" not in out.columns:
+        return out
+
+    pert_str = out["perturbation"].astype(str)
+    mask_summary = (pert_str == "mean") | (pert_str.str.startswith("mean_"))
+    return out.loc[~mask_summary].copy()
+
+
+def _get_metric_cols_for_mean(df, weight_col="n_true_ct"):
+    """
+    需要做平均的 metric 列：
+    - 所有 numeric 列
+    - 排除计数列
+    """
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    exclude_cols = {weight_col, "n_ctrl_ct", "n_pred_ct"}
+    metric_cols = [c for c in numeric_cols if c not in exclude_cols]
+    return metric_cols
+
+
+def append_celltype_mean_rows(final_df, weight_col="n_true_ct"):
+    df = final_df.copy()
+
+    if "cell_type" not in df.columns:
+        raise ValueError("final_df must contain a 'cell_type' column")
+
+    # 只用原始 perturbation 行做 summary，避免重复纳入 mean / mean_xxx
+    base_df = _get_summary_base_df(df)
+    metric_cols = _get_metric_cols_for_mean(base_df, weight_col=weight_col)
+
+    mean_rows = []
+    for ct, g in base_df.groupby("cell_type", sort=True, dropna=False):
+        row = {
+            "perturbation": f"mean_{ct}",
+            "cell_type": ct
+        }
+
+        # 计数列做 sum
+        if weight_col in g.columns:
+            row[weight_col] = g[weight_col].sum()
+        if "n_ctrl_ct" in g.columns:
+            row["n_ctrl_ct"] = g["n_ctrl_ct"].sum()
+        if "n_pred_ct" in g.columns:
+            row["n_pred_ct"] = g["n_pred_ct"].sum()
+
+        # 所有 metric 列直接简单平均
+        for col in metric_cols:
+            row[col] = g[col].mean(skipna=True)
+
+        mean_rows.append(row)
+
+    mean_df = pd.DataFrame(mean_rows)
+
+    # 对齐列顺序；没有的列自动补 NaN
+    for col in df.columns:
+        if col not in mean_df.columns:
+            mean_df[col] = np.nan
+    mean_df = mean_df[df.columns]
+
+    out = pd.concat([df, mean_df], ignore_index=True)
+    return out
+
+
+def make_celltype_mean_df(final_df, weight_col="n_true_ct"):
+    df = final_df.copy()
+
+    if "cell_type" not in df.columns:
+        raise ValueError("final_df must contain a 'cell_type' column")
+
+    # 只用原始 perturbation 行做 summary，避免重复纳入 mean / mean_xxx
+    base_df = _get_summary_base_df(df)
+    metric_cols = _get_metric_cols_for_mean(base_df, weight_col=weight_col)
+
+    rows = []
+    for ct, g in base_df.groupby("cell_type", sort=True, dropna=False):
+        row = {
+            "perturbation": f"mean_{ct}",
+            "cell_type": ct
+        }
+
+        # 计数列做 sum
+        if weight_col in g.columns:
+            row[weight_col] = g[weight_col].sum()
+        if "n_ctrl_ct" in g.columns:
+            row["n_ctrl_ct"] = g["n_ctrl_ct"].sum()
+        if "n_pred_ct" in g.columns:
+            row["n_pred_ct"] = g["n_pred_ct"].sum()
+
+        # 所有 metric 列直接简单平均
+        for col in metric_cols:
+            row[col] = g[col].mean(skipna=True)
+
+        rows.append(row)
+
+    out = pd.DataFrame(rows)
+
+    # 为了和上游结构一致，补齐原列
+    for col in df.columns:
+        if col not in out.columns:
+            out[col] = np.nan
+    out = out[df.columns]
+
+    return out
+
+
+
 
 import pandas as pd
 from .inference import run_batch_inference
 from .inference import batch_reconstruct_pca, batch_reconstruct_scvi, batch_reconstruct_flatvi, batch_reconstruct_state
-from .evals_new import evaluate_latent,evaluate_population_average,evaluate_population_distribution
 import anndata as ad
 
 def _ensure_perturbation_col(df: pd.DataFrame, key="perturbation") -> pd.DataFrame:
@@ -240,206 +469,211 @@ def _merge_on_perturbation(dfs, key="perturbation") -> pd.DataFrame:
     return merged
 
     
+
 import os
-import torch
-import numpy as np
-import anndata as ad
-import scvi
+import pandas as pd
+from .evals_new import evaluate_latent,evaluate_population_average,evaluate_population_distribution
+from .evals_new import transfer_cell_labels_knn,evaluate_stratified_by_celltype
 
 
-def evaluate_all(
+def evaluate_generated_results(
     *,
-    model,
+    results_embedding,
+    results_genes,
     adata_control,
     adata_test,
-    wishlist,            # 【核心修改 1】：从 target_conditions 改为 wishlist (List of Dicts)
-    condition_keys,      # 代表基础扰动的列名，如 'perturbation'
-    control_key,
-    condition_rep_keys,  # e.g., 'gene_embeddings'
     condition_combined_keys,
+    control_key,
     sample_rep,
-    device,
     results_save_path,
-    mass_deduct_keys = None,
-    n_particles: int = 10000,
+    mass_deduct_keys=None,
     random_seed: int = 42,
-    n_steps: int = 50,
-    scvi_model_load_path: str = None,
-    state_model_load_path: str = None,
-    run_origin_expression: bool = True,
-    origin_expression_batch_size: int = 2048,
-    do_log1p_when_not_pca: bool = True,
-    inplace_log1p: bool = False,
     Edistance_sample_num: int = 200,
     dist_max_cells: int = 200,
-    dist_max_genes: int = 100000,
-    dist_n_bins: int = 50,
     dist_top_n_degs: int = 50,
+    deg_padj_cutoff: float = 0.01,
+    deg_fc_cutoff: float = 2.0,
+    deg_top_n_for_eval: int = 50,
     save_each: bool = True,
     save_final: bool = True,
     final_filename: str = "final_metrics.csv",
-    detailed: bool = True,
+    detailed_perturbation: bool = True,
     use_groupwise_control: bool = True,
+    cell_type_key:str | None =None,   # 这里更适合是 str / None，不是 bool
+    detailed_celltype: bool = False,
 ):
+    """
+    模块二：基于生成的 Latent 和 Genes 字典，执行多维度的指标评估并保存结果。
+    """
     if adata_test is None:
         raise ValueError("adata_test is None, but evaluation needs treated data (adata_treated).")
+    if not results_embedding or not results_genes:
+        print("No inference results provided. Skipping evaluation.")
+        return pd.DataFrame(), {}
 
-    if not wishlist:
-        print("wishlist is empty")
-        return [], []
-        
     os.makedirs(results_save_path, exist_ok=True)
-    
-    # ---- 1. 解析法典与构建 Embedding 字典 ----
-    rulebook = adata_test.uns.get('global_rulebook')
+
+    # 解析法典
+    rulebook = adata_test.uns.get("global_rulebook")
     if rulebook is None:
         raise ValueError("adata_test.uns 缺少 'global_rulebook'。请先运行 prepare_covariates。")
 
-    # 自动从 Control 和 Test 集中收集所有出现过的基础扰动 (如药物) 的 Embedding
-    condition_embeddings = {}
-    for adata in [adata_control, adata_test]:
-        if condition_rep_keys in adata.obsm:
-            for pert in adata.obs[condition_keys].unique():
-                if pert not in condition_embeddings:
-                    idx = np.where(adata.obs[condition_keys] == pert)[0][0]
-                    condition_embeddings[pert] = adata.obsm[condition_rep_keys][idx]
-
-    # ---- 2. 采样起点细胞 X_0 ----
-    all_indices = np.arange(adata_control.n_obs)
-    rng = np.random.default_rng(random_seed)
-    indices = (
-        rng.choice(all_indices, n_particles, replace=False)
-        if n_particles < len(all_indices)
-        else all_indices
-    )
-
-    # 【核心修改 3】：不再剥离为 Tensor！直接传 AnnData 切片，保留 .obs 供推理器抽取固有属性！
-    adata_source_subset = adata_control[indices].copy()
-
-    # ---- 3. Inference (凭空造物) ----
-    results_embedding = run_batch_inference(
-        model=model,
-        adata_source=adata_source_subset,  # 传入 AnnData 格式的 X_0
-        rulebook=rulebook,                 # 传入法典
-        wishlist=wishlist,                 # 传入愿望清单
-        condition_embeddings=condition_embeddings, # 传入提取好的特征库
-        condition_key_name=condition_keys,
-        sample_rep=sample_rep,
-        n_steps=n_steps,
-        device=device
-    )
-
-    # ---- 4. Reconstruct (保持原样) ----
-    results_genes = None
-    model_ref = None
-    model_train = None
-    model_test = None
-
-    if sample_rep in ["X_pca_scaled", "X_pca"]:
-        results_genes = batch_reconstruct_pca(
-            inference_results=results_embedding,  
-            ref_adata=adata_control        
-        )
-    elif sample_rep in ["X_scVI"]:
-        model_ref = scvi.model.SCVI.load(f"{scvi_model_load_path}_ref", adata=adata_control)
-        model_train = scvi.model.SCVI.load(f"{scvi_model_load_path}_train", adata=adata_control)
-        model_test = scvi.model.SCVI.load(f"{scvi_model_load_path}_test", adata=adata_control)
-        results_genes = batch_reconstruct_scvi(
-            inference_results=results_embedding,
-            scvi_model=model_ref,  
-            target_library_size=1e4, 
-            batch_idx=None, 
-        )
-    elif sample_rep == "X_flatvi":
-        model_ref = scvi.model.SCVI.load(f"{scvi_model_load_path}_ref", adata=adata_control)
-        results_genes = batch_reconstruct_flatvi(
-            inference_results=results_embedding,
-            flatvi_model=model_ref,
-            target_library_size=1e4,
-            var_names=adata_control.var_names
-        )
-    elif sample_rep == "X_state":
-        from src.preprocessing import NBDecoder, NBDecoderTrainer
-        z_dim = adata_control.obsm["X_state"].shape[1]
-        n_genes = adata_control.n_vars
-        state_decoder = NBDecoder(z_dim=z_dim, n_genes=n_genes, hidden=(1024,2048,4096), dropout=0.1)
-        trainer = NBDecoderTrainer(state_decoder, device="cuda", use_amp=False)
-        trainer.load(state_model_load_path)  
-        state_decoder = trainer.decoder
-        state_decoder.eval()
-        
-        results_genes = batch_reconstruct_state(
-            inference_results=results_embedding,
-            state_decoder=state_decoder,
-            target_library_size=1e4,
-            var_names=adata_control.var_names
-        )
-
-    # ---- 5. Evaluate (评估) ----
-    # 🚨 注意：由于现在的 results_embedding 的 key 是从 wishlist 拼出来的字符串 (如 "DrugA_MCF7_1.0")
-    # 下游的 evaluate_latent 等函数切片 adata_treated 时，匹配的 column 需要对应得上。
-    # 建议将 pert_key 传为你生成的 condition_combined_keys，或者在评估函数内部适配字符串解析。
-    
+    # ---- 1. Evaluate ----
+    print("Evaluating Latent metrics (MSE, R2, PCC Delta, Wasserstein/Sinkhorn, etc.)...")
     latent_df = evaluate_latent(
         results_embedding=results_embedding,
         adata_treated=adata_test,
         adata_control=adata_control,
-        pert_key=condition_combined_keys,  # 确保传入的是 Tuple 字符串列名
-        control_label=control_key,
+        pert_key=condition_combined_keys,
         embedding_key=sample_rep,
-        rulebook=rulebook,                 # 传入法典
-        use_groupwise_control=use_groupwise_control       # 开启精细化筛选选项
+        rulebook=rulebook,
+        use_groupwise_control=use_groupwise_control,
+        distribution_sample_num=Edistance_sample_num,
+        random_seed=random_seed,
     )
+
+
+
+
+    print("Evaluating Population Average metrics...")
     avg_df = evaluate_population_average(
         results_genes=results_genes,
         adata_treated=adata_test,
         adata_control=adata_control,
         pert_key=condition_combined_keys,
-        control_label=control_key,
-        embedding_key=sample_rep,
-        Edistance_sample_num=Edistance_sample_num,
-        random_seed=random_seed,
-        detailed=detailed,
-        rulebook=rulebook,                 # 传入法典
-        use_groupwise_control= use_groupwise_control,      # 开启精细化筛选选项
-        mass_deduct_keys= mass_deduct_keys,
+        detailed = True,
+        rulebook=rulebook,
+        use_groupwise_control=use_groupwise_control,
+        mass_deduct_keys=mass_deduct_keys,
+        deg_padj_cutoff=deg_padj_cutoff,
+        deg_fc_cutoff=deg_fc_cutoff,
+        deg_top_n_for_eval=deg_top_n_for_eval,
     )
+
+
+    print("Evaluating Population Distribution metrics...")
     dist_df = evaluate_population_distribution(
         results_genes=results_genes,
         adata_treated=adata_test,
         adata_control=adata_control,
         pert_key=condition_combined_keys,
         max_cells=dist_max_cells,
-        max_genes=dist_max_genes,
-        n_bins=dist_n_bins,
         top_n_degs=dist_top_n_degs,
         seed=random_seed,
-        rulebook=rulebook,                 # 传入法典
-        use_groupwise_control= use_groupwise_control        # 开启精细化筛选选项
+        rulebook=rulebook,
+        use_groupwise_control=use_groupwise_control,
+        deg_padj_cutoff=deg_padj_cutoff,
+        deg_fc_cutoff=deg_fc_cutoff,
     )
 
-    # ---- 6. Save (保存) ----
-    if save_each:
-        _ensure_perturbation_col(latent_df).to_csv(os.path.join(results_save_path, "latent_metrics.csv"), index=False)
-        _ensure_perturbation_col(avg_df).to_csv(os.path.join(results_save_path, "average_metrics.csv"), index=False)
-        _ensure_perturbation_col(dist_df).to_csv(os.path.join(results_save_path, "distribution_metrics.csv"), index=False)
+    if cell_type_key is not None:
+        print("\n--- Starting Stratified Evaluation ---")
 
-    final_df = _merge_on_perturbation([latent_df, avg_df, dist_df], key="perturbation")
-    if detailed:
-        final_df = final_df.sort_values("perturbation").reset_index(drop=True)
+        # 1. 标签转移
+        predicted_labels_dict = transfer_cell_labels_knn(
+            results_embedding=results_embedding,
+            results_genes=results_genes,
+            adata_reference=adata_control,
+            cell_type_key=cell_type_key,
+            embedding_key=sample_rep,
+            n_neighbors=15,
+            max_ref_cells=50000,
+        )
+
+        # 2. 分层评估
+        stratified_df = evaluate_stratified_by_celltype(
+            results_embedding=results_embedding,
+            results_genes=results_genes,
+            predicted_labels_dict=predicted_labels_dict,
+            adata_treated=adata_test,
+            adata_control=adata_control,
+            pert_key=condition_combined_keys,
+            cell_type_key=cell_type_key,
+            embedding_key=sample_rep,
+            rulebook=rulebook,
+            use_groupwise_control=use_groupwise_control,
+            random_seed=random_seed,
+            distribution_sample_num=Edistance_sample_num,
+            top_n_degs=dist_top_n_degs,
+            deg_padj_cutoff=deg_padj_cutoff,
+            deg_fc_cutoff=deg_fc_cutoff,
+            deg_top_n_for_eval=deg_top_n_for_eval,
+        )
+
+        # 3. 保存
+        if save_each:
+            _ensure_perturbation_col(latent_df).to_csv(
+                os.path.join(results_save_path, "latent_metrics.csv"), index=False
+            )
+            _ensure_perturbation_col(avg_df).to_csv(
+                os.path.join(results_save_path, "average_metrics.csv"), index=False
+            )
+            _ensure_perturbation_col(dist_df).to_csv(
+                os.path.join(results_save_path, "distribution_metrics.csv"), index=False
+            )
+            _ensure_perturbation_col(stratified_df).to_csv(
+                os.path.join(results_save_path, "stratified_celltype_metrics.csv"), index=False
+            )
+
+        final_df = _merge_on_perturbation(
+            [latent_df, avg_df, dist_df, stratified_df],
+            key="perturbation",
+        )
+
+        if detailed_celltype and detailed_perturbation:
+            final_df = append_celltype_mean_rows(final_df, weight_col="n_true_ct")
+            final_df = final_df.sort_values(["perturbation", "cell_type"]).reset_index(drop=True)
+
+        elif detailed_celltype and (not detailed_perturbation):
+            final_df = make_celltype_mean_df(final_df, weight_col="n_true_ct")
+            final_df = final_df.sort_values("cell_type").reset_index(drop=True)
+
+        elif (not detailed_celltype) and detailed_perturbation:
+            final_df = final_df[final_df["cell_type"] == "all"].reset_index(drop=True)
+
+        else:
+            final_df = final_df[final_df["perturbation"] == "mean"].reset_index(drop=True)
+
+        if save_final:
+            final_path = os.path.join(results_save_path, final_filename)
+            final_df.to_csv(final_path, index=False)
+            print(f"All evaluations completed. Results saved to {final_path}")
+
+        artifacts = {
+            "latent_df": latent_df,
+            "avg_df": avg_df,
+            "dist_df": dist_df,
+            "stratified_df": stratified_df,
+        }
+
     else:
-        final_df = final_df[final_df["perturbation"] == "mean"].reset_index(drop=True)
+        if save_each:
+            _ensure_perturbation_col(latent_df).to_csv(
+                os.path.join(results_save_path, "latent_metrics.csv"), index=False
+            )
+            _ensure_perturbation_col(avg_df).to_csv(
+                os.path.join(results_save_path, "average_metrics.csv"), index=False
+            )
+            _ensure_perturbation_col(dist_df).to_csv(
+                os.path.join(results_save_path, "distribution_metrics.csv"), index=False
+            )
 
-    if save_final:
-        final_path = os.path.join(results_save_path, final_filename)
-        final_df.to_csv(final_path, index=False)
+        final_df = _merge_on_perturbation([latent_df, avg_df, dist_df], key="perturbation")
+        if detailed_perturbation:
+            final_df = final_df.sort_values("perturbation").reset_index(drop=True)
+        else:
+            final_df = final_df[final_df["perturbation"] == "mean"].reset_index(drop=True)
 
-    artifacts = {
-        "indices": indices,
-        "results_embedding": results_embedding,
-        "results_genes": results_genes,
-        "latent_df": latent_df,
-        "avg_df": avg_df,
-        "dist_df": dist_df,
-    }
+        if save_final:
+            final_path = os.path.join(results_save_path, final_filename)
+            final_df.to_csv(final_path, index=False)
+            print(f"All evaluations completed. Results saved to {final_path}")
+
+        artifacts = {
+            "latent_df": latent_df,
+            "avg_df": avg_df,
+            "dist_df": dist_df,
+        }
+
     return final_df, artifacts
+
