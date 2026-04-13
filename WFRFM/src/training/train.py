@@ -6,8 +6,9 @@ import os
 
 import numpy as np
 
-from .data import get_batch
 from .data import DataLoaderHelper
+from .data import MultiMarginalDataLoaderHelper
+from .data import sample_training_batch
 
 
 def train_model(adata_control, adata_treated, adata_test,
@@ -26,21 +27,28 @@ def train_model(adata_control, adata_treated, adata_test,
                 eval_interval = 10,
                 save_interval = 5000,
                 save_only_last = False):
-    
-    
-    train_loader = DataLoaderHelper(
-        adata_control, adata_treated, ot_results_train,
+
+    train_is_multi_marginal = ot_results_train.get("multi_marginal", False)
+    train_loader_cls = MultiMarginalDataLoaderHelper if train_is_multi_marginal else DataLoaderHelper
+    train_loader = train_loader_cls(
+        adata_control,
+        adata_treated,
+        ot_results_train,
         sample_rep=sample_rep,
         condition_keys=condition_keys,
-        condition_rep_keys=condition_rep_keys
+        condition_rep_keys=condition_rep_keys,
     )
     test_loader = None
     if adata_test is not None and ot_results_test is not None:
-        test_loader = DataLoaderHelper(
-            adata_control, adata_test, ot_results_test,
+        test_is_multi_marginal = ot_results_test.get("multi_marginal", False)
+        test_loader_cls = MultiMarginalDataLoaderHelper if test_is_multi_marginal else DataLoaderHelper
+        test_loader = test_loader_cls(
+            adata_control,
+            adata_test,
+            ot_results_test,
             sample_rep=sample_rep,
             condition_keys=condition_keys,
-            condition_rep_keys=condition_rep_keys
+            condition_rep_keys=condition_rep_keys,
         )
     
     progress_bar = tqdm(range(n_iterations), desc="Begin flow and growth matching...", unit="epoch")
@@ -50,7 +58,7 @@ def train_model(adata_control, adata_treated, adata_test,
     for i in progress_bar:
         model.train()
         optimizer.zero_grad()
-        t, xt, ut, gt, masst, cons = get_batch(
+        t, xt, ut, gt, masst, cons = sample_training_batch(
             helper=train_loader,
             batch_size_per_condition=batch_size_per_condition,
             batch_size_condition=batch_size_condition,
@@ -80,7 +88,7 @@ def train_model(adata_control, adata_treated, adata_test,
             model.eval()
             with torch.no_grad():
                 if test_loader is not None:
-                    t_test, xt_test, ut_test, gt_test, masst_test, cons_test = get_batch(
+                    t_test, xt_test, ut_test, gt_test, masst_test, cons_test = sample_training_batch(
                         helper=test_loader,
                         batch_size_per_condition=64,
                         batch_size_condition=7, 
@@ -103,13 +111,14 @@ def train_model(adata_control, adata_treated, adata_test,
             # logging.info(f"Epoch {i}: loss={loss.item():.3f}, vloss={vloss.item():.3f}, gloss={gloss.item():.3f}")
             # progress_bar.set_postfix({"loss": f"{loss.item():.3f}","vloss": f"{vloss.item():.3f}", "gloss": f"{gloss.item():.3f}"})
 
-        if (i+1) % 1000 == 0:
+        if (i+1) % save_interval == 0:
             if save_path is not None:
                 ckpt_path = f"{save_path}_epoch_{i+1}.pt"
+                scheduler_state_dict = scheduler.state_dict() if scheduler is not None else None
                 torch.save({
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(), 
+                    'scheduler_state_dict': scheduler_state_dict,
                     'vloss_list': vloss_list,
                     'gloss_list': gloss_list,
                     'loss_list': loss_list,
@@ -125,3 +134,13 @@ def train_model(adata_control, adata_treated, adata_test,
                     except OSError:
                         pass
                 last_ckpt_path = ckpt_path
+
+    return {
+        "vloss_list": vloss_list,
+        "gloss_list": gloss_list,
+        "loss_list": loss_list,
+        "test_loss_list": test_loss_list,
+        "test_vloss_list": test_vloss_list,
+        "test_gloss_list": test_gloss_list,
+        "last_checkpoint_path": last_ckpt_path,
+    }

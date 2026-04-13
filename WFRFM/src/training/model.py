@@ -146,12 +146,25 @@ class FNet(nn.Module):
             bottle_dim=bottle_dim, activation = activation
         )
 
-    def forward(self, t, z, con):
-        c = self.condition_encoder(con)
+    def forward(self, t, z, con, con_v=None, con_g=None):
         t_embed = self.t_encoder(t)
         t_embed = self.time_encoder(t_embed)
-        
-        v = self.v_net(t_embed, z, c)
-        g = self.g_net(t_embed, z, c)
+
+        if con_v is None and con_g is None:
+            c = self.condition_encoder(con)
+            v = self.v_net(t_embed, z, c)
+            g = self.g_net(t_embed, z, c)
+            return v, g
+
+        if con_v is None:
+            con_v = con
+        if con_g is None:
+            con_g = con
+
+        c_v = self.condition_encoder(con_v)
+        c_g = c_v if con_g is con_v else self.condition_encoder(con_g)
+
+        v = self.v_net(t_embed, z, c_v)
+        g = self.g_net(t_embed, z, c_g)
 
         return v, g

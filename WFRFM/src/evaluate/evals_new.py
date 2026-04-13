@@ -3,6 +3,7 @@ import pandas as pd
 import scanpy as sc
 import anndata as ad
 import scipy.sparse as sp
+import torch
 
 from scipy.spatial.distance import cosine
 
@@ -66,6 +67,417 @@ def compute_edistance(X, Y, max_n=2000, seed=42):
     d_yy = cdist(Y, Y, metric='euclidean').mean()
     
     return 2 * d_xy - d_xx - d_yy
+
+
+def _as_torch_2d(X, device=None, dtype=torch.float32, name="X"):
+    if torch.is_tensor(X):
+        tensor = X.detach()
+    else:
+        tensor = torch.as_tensor(X)
+
+    if tensor.ndim != 2:
+        raise ValueError(f"{name} must be 2D, got shape {tuple(tensor.shape)}")
+
+    if dtype is not None:
+        tensor = tensor.to(dtype=dtype)
+    if device is not None:
+        tensor = tensor.to(device)
+    return tensor
+
+
+def _normalize_sampling_weights(weights, n_samples, name):
+    if weights is None:
+        return torch.full((n_samples,), 1.0 / float(n_samples), dtype=torch.float64)
+
+    weights = torch.as_tensor(weights, dtype=torch.float64).reshape(-1).detach().cpu()
+    if weights.numel() != n_samples:
+        raise ValueError(
+            f"{name} must have length {n_samples}, got {weights.numel()}"
+        )
+
+    weights = torch.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0)
+    total = weights.sum()
+    if total <= 0:
+        raise ValueError(f"{name} must sum to a positive value after cleaning")
+    return weights / total
+
+
+def _sample_indices(weights, num_samples, target_device, generator=None):
+    indices_cpu = torch.multinomial(
+        weights,
+        num_samples=num_samples,
+        replacement=True,
+        generator=generator,
+    )
+    return indices_cpu.to(device=target_device, non_blocking=True)
+
+
+def _estimate_mean_pair_distance(
+    X,
+    Y,
+    weights_x,
+    weights_y,
+    num_pairs,
+    batch_size,
+    generator=None,
+):
+    if num_pairs <= 0:
+        raise ValueError("num_pairs must be positive")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    total_distance = torch.zeros((), dtype=torch.float64, device=X.device)
+    remaining = int(num_pairs)
+
+    while remaining > 0:
+        cur_batch = min(batch_size, remaining)
+        idx_x = _sample_indices(weights_x, cur_batch, target_device=X.device, generator=generator)
+        idx_y = _sample_indices(weights_y, cur_batch, target_device=Y.device, generator=generator)
+        batch_distance = torch.linalg.vector_norm(
+            X.index_select(0, idx_x) - Y.index_select(0, idx_y),
+            dim=1,
+        )
+        total_distance += batch_distance.to(torch.float64).sum()
+        remaining -= cur_batch
+
+    return total_distance / float(num_pairs)
+
+
+def compute_energy_distance_torch(
+    X_real,
+    X_pred,
+    real_weights=None,
+    pred_weights=None,
+    num_pairs=100000,
+    batch_size=2048,
+    device=None,
+    dtype=torch.float32,
+    seed=42,
+    clamp_min_zero=False,
+    return_details=False,
+):
+    """
+    Scalable Monte-Carlo Energy Distance for two empirical distributions.
+
+    ``real_weights`` defaults to a uniform empirical measure over real cells.
+    ``pred_weights`` should usually be the predicted particle mass. It is normalized
+    internally to sum to one, so this metric compares distributional geometry only.
+    Population-size / total-mass mismatch should be tracked separately.
+    """
+    if device is None:
+        if torch.is_tensor(X_real):
+            device = X_real.device
+        elif torch.is_tensor(X_pred):
+            device = X_pred.device
+        else:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+    if isinstance(device, str) and device.startswith("cuda") and not torch.cuda.is_available():
+        device = "cpu"
+
+    X_real = _as_torch_2d(X_real, device=device, dtype=dtype, name="X_real")
+    X_pred = _as_torch_2d(X_pred, device=device, dtype=dtype, name="X_pred")
+
+    if X_real.shape[1] != X_pred.shape[1]:
+        raise ValueError(
+            "X_real and X_pred must have the same feature dimension, got "
+            f"{X_real.shape[1]} and {X_pred.shape[1]}"
+        )
+
+    real_weights = _normalize_sampling_weights(real_weights, X_real.shape[0], "real_weights")
+    pred_weights = _normalize_sampling_weights(pred_weights, X_pred.shape[0], "pred_weights")
+
+    generator = torch.Generator(device="cpu")
+    if seed is not None:
+        generator.manual_seed(int(seed))
+
+    e_xy = _estimate_mean_pair_distance(
+        X_real,
+        X_pred,
+        real_weights,
+        pred_weights,
+        num_pairs=num_pairs,
+        batch_size=batch_size,
+        generator=generator,
+    )
+    e_xx = _estimate_mean_pair_distance(
+        X_real,
+        X_real,
+        real_weights,
+        real_weights,
+        num_pairs=num_pairs,
+        batch_size=batch_size,
+        generator=generator,
+    )
+    e_yy = _estimate_mean_pair_distance(
+        X_pred,
+        X_pred,
+        pred_weights,
+        pred_weights,
+        num_pairs=num_pairs,
+        batch_size=batch_size,
+        generator=generator,
+    )
+
+    energy = 2.0 * e_xy - e_xx - e_yy
+    if clamp_min_zero:
+        energy = torch.clamp(energy, min=0.0)
+
+    if return_details:
+        return {
+            "energy_distance": float(energy.item()),
+            "cross_term": float(e_xy.item()),
+            "real_self_term": float(e_xx.item()),
+            "pred_self_term": float(e_yy.item()),
+            "num_pairs": int(num_pairs),
+            "batch_size": int(batch_size),
+            "device": str(device),
+        }
+
+    return float(energy.item())
+
+
+def _load_dataframe_maybe(data):
+    if isinstance(data, pd.DataFrame):
+        return data.copy()
+    return pd.read_csv(data)
+
+
+def _safe_pearson(x, y):
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if x.size < 2 or y.size < 2:
+        return np.nan
+    if np.allclose(x, x[0]) or np.allclose(y, y[0]):
+        return np.nan
+    return float(pearsonr(x, y)[0])
+
+
+def build_mass_accuracy_tables(
+    mass_summary,
+    real_counts,
+    control_count=None,
+    condition_col="target_condition",
+    time_col="target_timepoint",
+    real_condition_col="gene_target",
+    real_time_col="timepoint",
+    real_count_col="n_obs_full",
+):
+    """
+    Build pair-level and transition-level mass evaluation tables.
+
+    ``mass_summary`` should provide one row per ``(condition, target_timepoint)``
+    with at least ``mass_sum`` and ``n_particles``.
+    ``real_counts`` should provide the matched real cell count per pair.
+    """
+    mass_df = _load_dataframe_maybe(mass_summary)
+    real_df = _load_dataframe_maybe(real_counts)
+
+    merged = mass_df.merge(
+        real_df,
+        left_on=[condition_col, time_col],
+        right_on=[real_condition_col, real_time_col],
+        how="inner",
+        validate="one_to_one",
+    )
+    if merged.empty:
+        raise RuntimeError("No overlapping rows between mass_summary and real_counts")
+
+    if control_count is None:
+        if "n_particles" not in merged.columns:
+            raise KeyError("control_count is None and mass_summary does not contain n_particles")
+        control_count = int(merged["n_particles"].iloc[0])
+    control_count = int(control_count)
+
+    merged[condition_col] = merged[condition_col].astype(str)
+    merged[time_col] = merged[time_col].astype(float)
+    merged[real_count_col] = merged[real_count_col].astype(float)
+    merged["mass_sum"] = merged["mass_sum"].astype(float)
+
+    merged["control_count"] = control_count
+    merged["real_ratio"] = merged[real_count_col] / float(control_count)
+    merged["pred_ratio"] = merged["mass_sum"] / float(control_count)
+
+    denom = float(np.square(merged["pred_ratio"]).sum())
+    calibration_factor = (
+        float(np.dot(merged["real_ratio"], merged["pred_ratio"]) / denom)
+        if denom > 0
+        else 1.0
+    )
+    merged["pred_ratio_calibrated"] = calibration_factor * merged["pred_ratio"]
+    merged["raw_error"] = merged["pred_ratio"] - merged["real_ratio"]
+    merged["calibrated_error"] = merged["pred_ratio_calibrated"] - merged["real_ratio"]
+    merged["abs_raw_error"] = merged["raw_error"].abs()
+    merged["abs_calibrated_error"] = merged["calibrated_error"].abs()
+    merged["pair_id"] = (
+        merged[condition_col].astype(str)
+        + "|t"
+        + merged[time_col].map(lambda x: f"{float(x):g}")
+    )
+    merged = merged.sort_values([condition_col, time_col]).reset_index(drop=True)
+
+    transition_rows = []
+    for condition, cond_df in merged.groupby(condition_col, sort=True):
+        prev_real = float(control_count)
+        prev_pred = float(control_count)
+        prev_time = 0.0
+        prev_label = "control"
+        for row in cond_df.sort_values(time_col).itertuples(index=False):
+            real_count = float(getattr(row, real_count_col))
+            pred_count = float(row.mass_sum)
+            cur_time = float(getattr(row, time_col))
+            real_fc = real_count / prev_real if prev_real > 0 else np.nan
+            pred_fc = pred_count / prev_pred if prev_pred > 0 else np.nan
+            transition_rows.append(
+                {
+                    "target_condition": str(condition),
+                    "target_timepoint": cur_time,
+                    "previous_timepoint": float(prev_time),
+                    "previous_label": prev_label,
+                    "transition_label": f"{prev_label}->{cur_time:g}",
+                    "real_count": real_count,
+                    "pred_mass_sum": pred_count,
+                    "real_fc": real_fc,
+                    "pred_fc": pred_fc,
+                    "fc_error": pred_fc - real_fc,
+                    "abs_fc_error": abs(pred_fc - real_fc),
+                }
+            )
+            prev_real = real_count
+            prev_pred = pred_count
+            prev_time = cur_time
+            prev_label = f"{cur_time:g}"
+
+    transitions = pd.DataFrame(transition_rows)
+    metrics = {
+        "control_count": control_count,
+        "n_pairs": int(merged.shape[0]),
+        "n_conditions": int(merged[condition_col].nunique()),
+        "calibration_factor": calibration_factor,
+        "total_ratio": {
+            "pearson_raw": _safe_pearson(merged["real_ratio"], merged["pred_ratio"]),
+            "pearson_calibrated": _safe_pearson(
+                merged["real_ratio"], merged["pred_ratio_calibrated"]
+            ),
+            "mae_raw": float(merged["abs_raw_error"].mean()),
+            "mae_calibrated": float(merged["abs_calibrated_error"].mean()),
+            "rmse_raw": float(np.sqrt(np.mean(np.square(merged["raw_error"])))),
+            "rmse_calibrated": float(
+                np.sqrt(np.mean(np.square(merged["calibrated_error"])))
+            ),
+        },
+        "transition_fold_change": {
+            "pearson": _safe_pearson(transitions["real_fc"], transitions["pred_fc"]),
+            "mae": float(transitions["abs_fc_error"].mean()),
+            "rmse": float(np.sqrt(np.mean(np.square(transitions["fc_error"])))),
+        },
+    }
+    return merged, transitions, metrics
+
+
+def _weighted_choice_without_replacement(weights, n_samples, rng):
+    weights = np.asarray(weights, dtype=np.float64).reshape(-1)
+    weights = np.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0)
+    n_items = weights.shape[0]
+    if n_samples > n_items:
+        raise ValueError("n_samples cannot exceed the number of items when replace=False")
+
+    positive_mask = weights > 0
+    n_positive = int(positive_mask.sum())
+    if n_positive == 0:
+        return rng.choice(n_items, size=n_samples, replace=False)
+
+    if n_positive >= n_samples:
+        prob = weights / weights.sum()
+        return rng.choice(n_items, size=n_samples, replace=False, p=prob)
+
+    selected = np.flatnonzero(positive_mask)
+    remaining = n_samples - selected.size
+    zero_idx = np.flatnonzero(~positive_mask)
+    extra = rng.choice(zero_idx, size=remaining, replace=False)
+    return np.concatenate([selected, extra])
+
+
+def compute_matched_sample_metrics(
+    X_real,
+    X_pred,
+    pred_weights=None,
+    n_match=None,
+    seed=42,
+):
+    """
+    Compare real and predicted latent samples after matched-size sampling.
+
+    - Real cells are sampled uniformly without replacement.
+    - Predicted particles are sampled without replacement using normalized mass weights.
+    - ``R2/PCC/MSE/MAE`` are computed on pseudo-bulk mean vectors.
+    - ``W1/W2`` are computed as the mean 1D Wasserstein distance across latent dimensions.
+    """
+    X_real = np.asarray(X_real, dtype=np.float32)
+    X_pred = np.asarray(X_pred, dtype=np.float32)
+    if X_real.ndim != 2 or X_pred.ndim != 2:
+        raise ValueError("X_real and X_pred must both be 2D arrays")
+    if X_real.shape[1] != X_pred.shape[1]:
+        raise ValueError("X_real and X_pred must share the same feature dimension")
+
+    n_real = X_real.shape[0]
+    n_pred = X_pred.shape[0]
+    if n_match is None:
+        n_match = min(n_real, n_pred)
+    n_match = int(n_match)
+    if n_match <= 0:
+        raise ValueError("n_match must be positive")
+    if n_match > min(n_real, n_pred):
+        raise ValueError("n_match cannot exceed min(n_real, n_pred) for replace=False")
+
+    rng = np.random.default_rng(seed)
+    idx_real = (
+        np.arange(n_real, dtype=np.int64)
+        if n_match == n_real
+        else rng.choice(n_real, size=n_match, replace=False)
+    )
+
+    if pred_weights is None:
+        idx_pred = (
+            np.arange(n_pred, dtype=np.int64)
+            if n_match == n_pred
+            else rng.choice(n_pred, size=n_match, replace=False)
+        )
+    else:
+        idx_pred = _weighted_choice_without_replacement(pred_weights, n_match, rng)
+
+    X_real_match = X_real[idx_real]
+    X_pred_match = X_pred[idx_pred]
+
+    mean_real = X_real_match.mean(axis=0, dtype=np.float64)
+    mean_pred = X_pred_match.mean(axis=0, dtype=np.float64)
+    diff = mean_pred - mean_real
+
+    if np.std(mean_real) == 0 or np.std(mean_pred) == 0:
+        pcc = np.nan
+    else:
+        pcc = float(pearsonr(mean_real, mean_pred)[0])
+
+    r2 = float(r2_score(mean_real, mean_pred))
+    mse = float(np.mean(np.square(diff)))
+    mae = float(np.mean(np.abs(diff)))
+
+    X_real_sorted = np.sort(X_real_match.astype(np.float64), axis=0)
+    X_pred_sorted = np.sort(X_pred_match.astype(np.float64), axis=0)
+    sorted_diff = X_pred_sorted - X_real_sorted
+    w1 = float(np.mean(np.mean(np.abs(sorted_diff), axis=0)))
+    w2 = float(np.mean(np.sqrt(np.mean(np.square(sorted_diff), axis=0))))
+
+    return {
+        "n_real_available": int(n_real),
+        "n_pred_available": int(n_pred),
+        "n_match": int(n_match),
+        "r2": r2,
+        "pcc": pcc,
+        "mse": mse,
+        "mae": mae,
+        "w1": w1,
+        "w2": w2,
+    }
 
 
 def evaluate_latent(

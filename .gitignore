@@ -1,5 +1,5 @@
 WFRFM/data/*
-WFRFM/experiments/*
+
 WFRFM/results/*
 **/.ipynb_checkpoints/
 **/__pycache__/
@@ -15,6 +15,11 @@ WFRFM/data/processed/*
 !WFRFM/experiments/ot_plan/
 WFRFM/experiments/ot_plan/*
 !WFRFM/experiments/ot_plan/.gitkeep
+!WFRFM/experiments/train_zebrafish_multimarginal.py
 WFRFM/lightning_logs/*
 WFRFM/trash/*
+CellFlow
 
+WFRFM/evaluation/*
+AGENTS.md
+results/*

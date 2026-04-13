@@ -1,9 +1,11 @@
+import anndata as ad
 import scanpy as sc
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.preprocessing import MinMaxScaler
+from matplotlib.lines import Line2D
 
 def plot_perturbation_umap(
     results_embedding, 
@@ -119,6 +121,516 @@ def plot_perturbation_umap(
         
         plt.tight_layout()
         plt.show()
+
+
+def _normalize_mass_weights_np(weights):
+    weights = np.asarray(weights, dtype=np.float64).reshape(-1)
+    weights = np.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0)
+    total = weights.sum()
+    if total <= 0:
+        return np.full(weights.shape[0], 1.0 / float(weights.shape[0]), dtype=np.float64)
+    return weights / total
+
+
+def resample_prediction_adata_by_mass(
+    pred_adata: ad.AnnData,
+    n_samples: int,
+    weight_key: str = "mass",
+    seed: int = 42,
+):
+    """Resample predicted particles with replacement according to mass weights."""
+    if n_samples <= 0:
+        raise ValueError("n_samples must be positive")
+    if pred_adata.n_obs == 0:
+        raise ValueError("pred_adata must contain at least one observation")
+
+    if weight_key in pred_adata.obs.columns:
+        weights = _normalize_mass_weights_np(pred_adata.obs[weight_key].to_numpy())
+    else:
+        weights = np.full(pred_adata.n_obs, 1.0 / float(pred_adata.n_obs), dtype=np.float64)
+
+    rng = np.random.default_rng(seed)
+    sampled_idx = rng.choice(pred_adata.n_obs, size=n_samples, replace=True, p=weights)
+    sampled = pred_adata[sampled_idx].copy()
+    sampled.obs["resampled_source_obs_name"] = pred_adata.obs_names[sampled_idx].astype(str)
+    sampled.obs["resampled_source_index"] = sampled_idx.astype(np.int64)
+    sampled.obs["resampled_rank"] = np.arange(n_samples, dtype=np.int64)
+    sampled.obs_names = [
+        f"{source_name}__rs{rank}"
+        for rank, source_name in enumerate(sampled.obs["resampled_source_obs_name"].astype(str))
+    ]
+    return sampled
+
+
+def _latent_to_vis_adata(latent, obs, prefix):
+    vis_adata = ad.AnnData(X=np.asarray(latent, dtype=np.float32), obs=obs.copy())
+    vis_adata.var_names = [f"{prefix}_{idx}" for idx in range(vis_adata.shape[1])]
+    return vis_adata
+
+
+def build_condition_real_prediction_umap_adata(
+    real_adata: ad.AnnData,
+    pred_adata: ad.AnnData,
+    condition: str,
+    timepoints: list,
+    condition_key: str = "gene_target",
+    time_key: str = "timepoint",
+    latent_key: str = "X_pca_scaled",
+    weight_key: str = "mass",
+    seed: int = 42,
+):
+    """
+    Build a condition-level AnnData for UMAP by matching sampled predicted counts to real counts.
+
+    The predicted side is resampled with replacement using normalized mass weights for each
+    ``(condition, timepoint)`` pair, so the sampled predicted count exactly matches the number
+    of real cells in that pair.
+    """
+    condition = str(condition)
+    timepoints = sorted({float(timepoint) for timepoint in timepoints})
+    vis_adatas = []
+    summary_rows = []
+
+    for offset, timepoint in enumerate(timepoints):
+        real_subset = real_adata[
+            (real_adata.obs[condition_key].astype(str) == condition)
+            & (real_adata.obs[time_key].astype(float) == timepoint)
+        ].copy()
+        pred_subset = pred_adata[
+            (pred_adata.obs["target_condition"].astype(str) == condition)
+            & (pred_adata.obs["target_timepoint"].astype(float) == timepoint)
+        ].copy()
+
+        if real_subset.n_obs == 0 or pred_subset.n_obs == 0:
+            continue
+
+        sampled_pred = resample_prediction_adata_by_mass(
+            pred_adata=pred_subset,
+            n_samples=int(real_subset.n_obs),
+            weight_key=weight_key,
+            seed=seed + offset,
+        )
+
+        real_obs = real_subset.obs.copy()
+        real_obs["plot_source"] = "real"
+        real_obs["plot_condition"] = condition
+        real_obs["plot_timepoint"] = float(timepoint)
+        real_obs["plot_group"] = f"real_t{float(timepoint):g}"
+        real_vis = _latent_to_vis_adata(real_subset.obsm[latent_key], real_obs, prefix="latent")
+        real_vis.obs_names = [
+            f"real|{condition}|t{float(timepoint):g}|{obs_name}"
+            for obs_name in real_subset.obs_names.astype(str)
+        ]
+
+        pred_obs = sampled_pred.obs.copy()
+        pred_obs["plot_source"] = "pred_sampled"
+        pred_obs["plot_condition"] = condition
+        pred_obs["plot_timepoint"] = float(timepoint)
+        pred_obs["plot_group"] = f"pred_t{float(timepoint):g}"
+        pred_vis = _latent_to_vis_adata(sampled_pred.X, pred_obs, prefix="latent")
+        pred_vis.obs_names = [
+            f"pred|{condition}|t{float(timepoint):g}|{obs_name}"
+            for obs_name in sampled_pred.obs_names.astype(str)
+        ]
+
+        vis_adatas.extend([real_vis, pred_vis])
+        summary_rows.append(
+            {
+                "condition": condition,
+                "timepoint": float(timepoint),
+                "n_real": int(real_subset.n_obs),
+                "n_pred_available": int(pred_subset.n_obs),
+                "n_pred_sampled": int(sampled_pred.n_obs),
+                "n_unique_pred_sampled": int(sampled_pred.obs["resampled_source_obs_name"].nunique()),
+                "sampled_mass_mean": float(sampled_pred.obs[weight_key].astype(float).mean())
+                if weight_key in sampled_pred.obs.columns
+                else np.nan,
+                "sampled_mass_sum": float(sampled_pred.obs[weight_key].astype(float).sum())
+                if weight_key in sampled_pred.obs.columns
+                else np.nan,
+            }
+        )
+
+    if not vis_adatas:
+        raise RuntimeError(f"No overlapping real/predicted pairs found for condition {condition}")
+
+    combined = ad.concat(
+        vis_adatas,
+        axis=0,
+        join="outer",
+        merge="same",
+        index_unique=None,
+    )
+    combined.uns["umap_sampling_metadata"] = {
+        "condition": condition,
+        "timepoints": timepoints,
+        "latent_key": latent_key,
+        "weight_key": weight_key,
+        "sampling_scheme": "predictions resampled with replacement by normalized mass to match real pair counts",
+    }
+    return combined, pd.DataFrame(summary_rows)
+
+
+def compute_latent_umap(
+    adata_vis: ad.AnnData,
+    n_neighbors: int = 30,
+    min_dist: float = 0.3,
+    random_state: int = 42,
+):
+    sc.pp.neighbors(adata_vis, n_neighbors=n_neighbors, use_rep="X")
+    sc.tl.umap(adata_vis, min_dist=min_dist, random_state=random_state)
+    return adata_vis
+
+
+def plot_condition_real_prediction_umap(
+    adata_vis: ad.AnnData,
+    output_path,
+    title: str | None = None,
+    point_size: float = 6.0,
+    alpha: float = 0.65,
+):
+    if "X_umap" not in adata_vis.obsm:
+        raise KeyError("adata_vis.obsm['X_umap'] is required before plotting")
+
+    coords = np.asarray(adata_vis.obsm["X_umap"], dtype=np.float32)
+    plot_df = adata_vis.obs.copy()
+    plot_df["UMAP1"] = coords[:, 0]
+    plot_df["UMAP2"] = coords[:, 1]
+
+    source_palette = {
+        "real": "#d62728",
+        "pred_sampled": "#1f77b4",
+    }
+    unique_timepoints = sorted(plot_df["plot_timepoint"].astype(float).unique().tolist())
+    time_palette = dict(
+        zip(unique_timepoints, sns.color_palette("viridis", n_colors=len(unique_timepoints)))
+    )
+    marker_map = {
+        "real": "o",
+        "pred_sampled": "^",
+    }
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    ax = axes[0]
+    for source_name, color in source_palette.items():
+        subset = plot_df[plot_df["plot_source"] == source_name]
+        if subset.empty:
+            continue
+        ax.scatter(
+            subset["UMAP1"],
+            subset["UMAP2"],
+            s=point_size,
+            alpha=alpha,
+            c=[color],
+            marker=marker_map.get(source_name, "o"),
+            label=source_name,
+            linewidths=0.0,
+            rasterized=True,
+        )
+    ax.set_title("Real vs Mass-Resampled Prediction")
+    ax.legend(frameon=False)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    ax = axes[1]
+    for timepoint in unique_timepoints:
+        for source_name, marker in marker_map.items():
+            subset = plot_df[
+                (plot_df["plot_timepoint"].astype(float) == float(timepoint))
+                & (plot_df["plot_source"] == source_name)
+            ]
+            if subset.empty:
+                continue
+            ax.scatter(
+                subset["UMAP1"],
+                subset["UMAP2"],
+                s=point_size,
+                alpha=alpha,
+                c=[time_palette[timepoint]],
+                marker=marker,
+                label=f"{source_name}_t{float(timepoint):g}",
+                linewidths=0.0,
+                rasterized=True,
+            )
+    ax.set_title("By Timepoint")
+    ax.legend(frameon=False, ncol=2, fontsize=8)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    if title is not None:
+        fig.suptitle(title)
+
+    plt.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _collapse_categories(series, max_categories=12):
+    series = pd.Series(series).astype(str).fillna("Unknown")
+    counts = series.value_counts(dropna=False)
+    if max_categories is None or counts.shape[0] <= max_categories:
+        return series, counts
+
+    keep = counts.index[: max_categories - 1]
+    collapsed = series.where(series.isin(keep), other="Other")
+    return collapsed, collapsed.value_counts(dropna=False)
+
+
+def plot_saved_condition_umap_with_real_categories(
+    adata_vis: ad.AnnData,
+    output_path,
+    real_color_key: str = "major_group",
+    secondary_real_color_key: str = "tissue",
+    max_categories: int = 12,
+    pred_alpha: float = 0.08,
+    real_alpha: float = 0.85,
+    pred_size: float = 2.0,
+    real_size: float = 5.0,
+):
+    """
+    Redraw a saved condition-level UMAP with reduced occlusion.
+
+    Render a 2x2 redraw layout:
+    - real_color_key over prediction background
+    - secondary_real_color_key over prediction background
+    - datatype
+    - timepoint
+    """
+    if "X_umap" not in adata_vis.obsm:
+        raise KeyError("adata_vis.obsm['X_umap'] is required before plotting")
+
+    plot_df = adata_vis.obs.copy()
+    coords = np.asarray(adata_vis.obsm["X_umap"], dtype=np.float32)
+    plot_df["UMAP1"] = coords[:, 0]
+    plot_df["UMAP2"] = coords[:, 1]
+    plot_df["plot_source"] = plot_df["plot_source"].astype(str)
+
+    real_df = plot_df[plot_df["plot_source"] == "real"].copy()
+    pred_df = plot_df[plot_df["plot_source"] == "pred_sampled"].copy()
+    if real_df.empty or pred_df.empty:
+        raise RuntimeError("Both real and pred_sampled observations are required for redraw")
+
+    for color_key in (real_color_key, secondary_real_color_key):
+        if color_key not in real_df.columns:
+            raise KeyError(f"{color_key} is not found in real observations")
+
+    real_df["primary_category"], primary_counts = _collapse_categories(
+        real_df[real_color_key],
+        max_categories=max_categories,
+    )
+    real_df["secondary_category"], secondary_counts = _collapse_categories(
+        real_df[secondary_real_color_key],
+        max_categories=max_categories,
+    )
+    primary_order = primary_counts.index.tolist()
+    primary_palette = dict(
+        zip(primary_order, sns.color_palette("tab20", n_colors=len(primary_order)))
+    )
+    secondary_order = secondary_counts.index.tolist()
+    secondary_palette = dict(
+        zip(secondary_order, sns.color_palette("Set2", n_colors=len(secondary_order)))
+    )
+
+    pred_timepoints = sorted(pred_df["plot_timepoint"].astype(float).unique().tolist())
+    time_palette = dict(
+        zip(pred_timepoints, sns.color_palette("viridis", n_colors=len(pred_timepoints)))
+    )
+
+    datatype_palette = {
+        "real": "#d62728",
+        "pred_sampled": "#4c78a8",
+    }
+    marker_map = {
+        "real": "o",
+        "pred_sampled": "^",
+    }
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+
+    ax = axes[0, 0]
+    ax.scatter(
+        pred_df["UMAP1"],
+        pred_df["UMAP2"],
+        s=pred_size,
+        c="#b0b7c3",
+        alpha=pred_alpha,
+        linewidths=0.0,
+        rasterized=True,
+    )
+    for category in primary_order:
+        subset = real_df[real_df["primary_category"] == category]
+        ax.scatter(
+            subset["UMAP1"],
+            subset["UMAP2"],
+            s=real_size,
+            c=[primary_palette[category]],
+            alpha=real_alpha,
+            linewidths=0.0,
+            rasterized=True,
+            label=category,
+        )
+    ax.set_title(str(real_color_key))
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    ax = axes[0, 1]
+    ax.scatter(
+        pred_df["UMAP1"],
+        pred_df["UMAP2"],
+        s=pred_size,
+        c="#b0b7c3",
+        alpha=pred_alpha,
+        linewidths=0.0,
+        rasterized=True,
+    )
+    for category in secondary_order:
+        subset = real_df[real_df["secondary_category"] == category]
+        ax.scatter(
+            subset["UMAP1"],
+            subset["UMAP2"],
+            s=real_size,
+            c=[secondary_palette[category]],
+            alpha=real_alpha,
+            linewidths=0.0,
+            rasterized=True,
+            label=category,
+        )
+    ax.set_title(str(secondary_real_color_key))
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    ax = axes[1, 0]
+    for source_name, color in datatype_palette.items():
+        subset = plot_df[plot_df["plot_source"] == source_name]
+        if subset.empty:
+            continue
+        ax.scatter(
+            subset["UMAP1"],
+            subset["UMAP2"],
+            s=real_size if source_name == "real" else pred_size,
+            c=[color],
+            alpha=real_alpha if source_name == "real" else 0.18,
+            marker=marker_map[source_name],
+            linewidths=0.0,
+            rasterized=True,
+        )
+    ax.set_title("Datatype")
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    ax = axes[1, 1]
+    for source_name, marker in marker_map.items():
+        subset_source = plot_df[plot_df["plot_source"] == source_name]
+        if subset_source.empty:
+            continue
+        for timepoint in pred_timepoints:
+            subset = subset_source[
+                subset_source["plot_timepoint"].astype(float) == float(timepoint)
+            ]
+            if subset.empty:
+                continue
+            ax.scatter(
+                subset["UMAP1"],
+                subset["UMAP2"],
+                s=real_size if source_name == "real" else pred_size,
+                c=[time_palette[timepoint]],
+                alpha=0.55 if source_name == "real" else 0.2,
+                marker=marker,
+                linewidths=0.0,
+                rasterized=True,
+            )
+    ax.set_title("Timepoint")
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    primary_handles = [
+        Line2D([0], [0], marker="o", linestyle="", markerfacecolor=primary_palette[category],
+               markeredgecolor="none", markersize=6, label=str(category))
+        for category in primary_order
+    ]
+    secondary_handles = [
+        Line2D([0], [0], marker="o", linestyle="", markerfacecolor=secondary_palette[category],
+               markeredgecolor="none", markersize=6, label=str(category))
+        for category in secondary_order
+    ]
+    time_handles = [
+        Line2D([0], [0], marker="o", linestyle="", markerfacecolor=time_palette[timepoint],
+               markeredgecolor="none", markersize=6, label=f"t{float(timepoint):g}")
+        for timepoint in pred_timepoints
+    ]
+
+    axes[0, 0].legend(
+        handles=primary_handles,
+        title=real_color_key,
+        loc="upper left",
+        bbox_to_anchor=(1.01, 1.0),
+        frameon=False,
+        fontsize=8,
+        title_fontsize=9,
+    )
+    axes[0, 1].legend(
+        handles=secondary_handles,
+        title=secondary_real_color_key,
+        loc="upper left",
+        bbox_to_anchor=(1.01, 1.0),
+        frameon=False,
+        fontsize=8,
+        title_fontsize=9,
+    )
+    datatype_handles = [
+        Line2D([0], [0], marker=marker_map[source_name], linestyle="", markerfacecolor="#666666",
+               markeredgecolor="none", markersize=6, label=source_name)
+        for source_name in marker_map
+    ]
+
+    time_legend = axes[1, 1].legend(
+        handles=time_handles,
+        title="timepoint",
+        loc="upper left",
+        bbox_to_anchor=(1.01, 1.0),
+        frameon=False,
+        fontsize=8,
+        title_fontsize=9,
+    )
+    axes[1, 1].add_artist(time_legend)
+    axes[1, 0].legend(
+        handles=datatype_handles,
+        title="datatype",
+        loc="upper left",
+        bbox_to_anchor=(1.01, 1.0),
+        frameon=False,
+        fontsize=8,
+        title_fontsize=9,
+    )
+
+    condition_name = str(plot_df["plot_condition"].astype(str).iloc[0])
+    fig.suptitle(condition_name)
+    plt.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    primary_summary = (
+        real_df.assign(category_key=real_color_key, category_value=real_df["primary_category"])
+        .groupby(["category_key", "plot_timepoint", "category_value"], observed=True)
+        .size()
+        .reset_index(name="n_real")
+    )
+    secondary_summary = (
+        real_df.assign(
+            category_key=secondary_real_color_key,
+            category_value=real_df["secondary_category"],
+        )
+        .groupby(["category_key", "plot_timepoint", "category_value"], observed=True)
+        .size()
+        .reset_index(name="n_real")
+    )
+    category_summary = pd.concat([primary_summary, secondary_summary], ignore_index=True)
+    category_summary = category_summary.sort_values(
+        ["category_key", "plot_timepoint", "n_real"],
+        ascending=[True, True, False],
+    ).reset_index(drop=True)
+    return category_summary
 
 
 
@@ -262,3 +774,361 @@ def plot_top_degs_violin(
     plt.show()
 
 
+def plot_mass_accuracy_summary(
+    pair_df: pd.DataFrame,
+    transition_df: pd.DataFrame,
+    metrics: dict,
+    output_path,
+    title: str | None = None,
+):
+    if pair_df.empty:
+        raise RuntimeError("pair_df must not be empty")
+    if transition_df.empty:
+        raise RuntimeError("transition_df must not be empty")
+
+    condition_order = sorted(pair_df["target_condition"].astype(str).unique().tolist())
+    condition_palette = dict(
+        zip(condition_order, sns.color_palette("tab10", n_colors=len(condition_order)))
+    )
+    timepoints = sorted(pair_df["target_timepoint"].astype(float).unique().tolist())
+    marker_cycle = ["o", "s", "^", "D", "P", "X", "v", "<", ">"]
+    time_markers = {
+        float(timepoint): marker_cycle[idx % len(marker_cycle)]
+        for idx, timepoint in enumerate(timepoints)
+    }
+
+    def _scatter_pairs(ax, xcol, ycol, xlabel, ylabel, subtitle):
+        max_val = float(max(pair_df[xcol].max(), pair_df[ycol].max()))
+        line_max = max(1.05 * max_val, 0.1)
+        ax.plot([0, line_max], [0, line_max], linestyle="--", color="#666666", linewidth=1)
+        for _, row in pair_df.iterrows():
+            ax.scatter(
+                row[xcol],
+                row[ycol],
+                s=60,
+                c=[condition_palette[str(row["target_condition"])]],
+                marker=time_markers[float(row["target_timepoint"])],
+                alpha=0.9,
+                linewidths=0.3,
+                edgecolors="black",
+                rasterized=True,
+            )
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_title(subtitle)
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+
+    ax = axes[0, 0]
+    _scatter_pairs(
+        ax,
+        "real_ratio",
+        "pred_ratio",
+        "Real total mass ratio (N_t / N_control)",
+        "Predicted total mass ratio (sum(m) / N_control)",
+        "Raw Total Mass Ratio",
+    )
+    ax.text(
+        0.03,
+        0.97,
+        (
+            f"r = {metrics['total_ratio']['pearson_raw']:.3f}\n"
+            f"MAE = {metrics['total_ratio']['mae_raw']:.3f}\n"
+            f"RMSE = {metrics['total_ratio']['rmse_raw']:.3f}"
+        ),
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=10,
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.85, edgecolor="#cccccc"),
+    )
+
+    ax = axes[0, 1]
+    _scatter_pairs(
+        ax,
+        "real_ratio",
+        "pred_ratio_calibrated",
+        "Real total mass ratio (N_t / N_control)",
+        "Calibrated predicted ratio",
+        "Single-Scale Calibrated Total Mass Ratio",
+    )
+    ax.text(
+        0.03,
+        0.97,
+        (
+            f"scale = {metrics['calibration_factor']:.3f}\n"
+            f"r = {metrics['total_ratio']['pearson_calibrated']:.3f}\n"
+            f"MAE = {metrics['total_ratio']['mae_calibrated']:.3f}"
+        ),
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=10,
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.85, edgecolor="#cccccc"),
+    )
+
+    ax = axes[1, 0]
+    max_fc = float(max(transition_df["real_fc"].max(), transition_df["pred_fc"].max()))
+    line_max = max(1.05 * max_fc, 0.1)
+    ax.plot([0, line_max], [0, line_max], linestyle="--", color="#666666", linewidth=1)
+    for _, row in transition_df.iterrows():
+        ax.scatter(
+            row["real_fc"],
+            row["pred_fc"],
+            s=60,
+            c=[condition_palette[str(row["target_condition"])]],
+            marker=time_markers[float(row["target_timepoint"])],
+            alpha=0.9,
+            linewidths=0.3,
+            edgecolors="black",
+            rasterized=True,
+        )
+    ax.set_xlabel("Real adjacent fold-change")
+    ax.set_ylabel("Predicted adjacent fold-change")
+    ax.set_title("Adjacent Mass Fold-Change")
+    ax.text(
+        0.03,
+        0.97,
+        (
+            f"r = {metrics['transition_fold_change']['pearson']:.3f}\n"
+            f"MAE = {metrics['transition_fold_change']['mae']:.3f}\n"
+            f"RMSE = {metrics['transition_fold_change']['rmse']:.3f}"
+        ),
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=10,
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.85, edgecolor="#cccccc"),
+    )
+
+    ax = axes[1, 1]
+    linestyle_map = {"Real": "-", "Pred": "--", "Pred (cal.)": ":"}
+    marker_map = {"Real": "o", "Pred": "s", "Pred (cal.)": "^"}
+    for condition in condition_order:
+        cond_df = pair_df[pair_df["target_condition"].astype(str) == condition].sort_values(
+            "target_timepoint"
+        )
+        color = condition_palette[condition]
+        ax.plot(
+            cond_df["target_timepoint"],
+            cond_df["real_ratio"],
+            linestyle=linestyle_map["Real"],
+            marker=marker_map["Real"],
+            color=color,
+            linewidth=2,
+            markersize=5,
+            alpha=0.95,
+        )
+        ax.plot(
+            cond_df["target_timepoint"],
+            cond_df["pred_ratio"],
+            linestyle=linestyle_map["Pred"],
+            marker=marker_map["Pred"],
+            color=color,
+            linewidth=1.7,
+            markersize=4.5,
+            alpha=0.95,
+        )
+        ax.plot(
+            cond_df["target_timepoint"],
+            cond_df["pred_ratio_calibrated"],
+            linestyle=linestyle_map["Pred (cal.)"],
+            marker=marker_map["Pred (cal.)"],
+            color=color,
+            linewidth=1.7,
+            markersize=4.5,
+            alpha=0.95,
+        )
+    ax.set_title("Per-Condition Mass Trajectories")
+    ax.set_xlabel("Target timepoint")
+    ax.set_ylabel("Mass ratio vs control")
+
+    condition_handles = [
+        Line2D([0], [0], color=condition_palette[condition], linewidth=2, label=condition)
+        for condition in condition_order
+    ]
+    style_handles = [
+        Line2D(
+            [0],
+            [0],
+            color="black",
+            linestyle=linestyle_map[label],
+            marker=marker_map[label],
+            linewidth=1.8,
+            markersize=5,
+            label=label,
+        )
+        for label in ["Real", "Pred", "Pred (cal.)"]
+    ]
+    cond_legend = ax.legend(
+        handles=condition_handles,
+        title="condition",
+        loc="upper left",
+        bbox_to_anchor=(1.01, 1.0),
+        frameon=False,
+        fontsize=8,
+        title_fontsize=9,
+    )
+    ax.add_artist(cond_legend)
+    ax.legend(
+        handles=style_handles,
+        title="series",
+        loc="upper left",
+        bbox_to_anchor=(1.01, 0.38),
+        frameon=False,
+        fontsize=8,
+        title_fontsize=9,
+    )
+
+    time_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker=time_markers[timepoint],
+            linestyle="",
+            color="black",
+            markersize=6,
+            label=f"t{float(timepoint):g}",
+        )
+        for timepoint in timepoints
+    ]
+    axes[0, 1].legend(
+        handles=time_handles,
+        title="timepoint",
+        loc="upper left",
+        bbox_to_anchor=(1.01, 0.35),
+        frameon=False,
+        fontsize=8,
+        title_fontsize=9,
+    )
+
+    if title is not None:
+        fig.suptitle(title)
+    plt.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_mass_accuracy_condition_grid(
+    pair_df: pd.DataFrame,
+    metrics: dict,
+    output_path,
+    ncols: int = 2,
+):
+    if pair_df.empty:
+        raise RuntimeError("pair_df must not be empty")
+
+    condition_order = sorted(pair_df["target_condition"].astype(str).unique().tolist())
+    n_conditions = len(condition_order)
+    ncols = max(1, int(ncols))
+    nrows = int(np.ceil(n_conditions / float(ncols)))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7 * ncols, 3.8 * nrows), squeeze=False)
+
+    for ax in axes.ravel():
+        ax.set_visible(False)
+
+    for idx, condition in enumerate(condition_order):
+        ax = axes[idx // ncols, idx % ncols]
+        ax.set_visible(True)
+        cond_df = pair_df[pair_df["target_condition"].astype(str) == condition].sort_values(
+            "target_timepoint"
+        )
+        ax.plot(
+            cond_df["target_timepoint"],
+            cond_df["real_ratio"],
+            color="#d62728",
+            linestyle="-",
+            marker="o",
+            linewidth=2,
+            label="Real",
+        )
+        ax.plot(
+            cond_df["target_timepoint"],
+            cond_df["pred_ratio"],
+            color="#1f77b4",
+            linestyle="--",
+            marker="s",
+            linewidth=1.8,
+            label="Pred",
+        )
+        ax.plot(
+            cond_df["target_timepoint"],
+            cond_df["pred_ratio_calibrated"],
+            color="#2ca02c",
+            linestyle=":",
+            marker="^",
+            linewidth=1.8,
+            label="Pred (cal.)",
+        )
+        ax.set_title(condition)
+        ax.set_xlabel("Target timepoint")
+        ax.set_ylabel("Mass ratio vs control")
+        ax.grid(axis="y", linestyle="--", alpha=0.25)
+        ax.legend(frameon=False, fontsize=8)
+
+    fig.suptitle(
+        "Per-Condition Mass Trajectories\n"
+        f"single global calibration factor = {metrics['calibration_factor']:.3f}"
+    )
+    plt.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_metric_heatmap_grid(
+    metrics_df: pd.DataFrame,
+    output_path,
+    condition_col: str = "target_condition",
+    time_col: str = "target_timepoint",
+    metric_order=None,
+    title: str | None = None,
+):
+    if metrics_df.empty:
+        raise RuntimeError("metrics_df must not be empty")
+
+    if metric_order is None:
+        metric_order = ["r2", "pcc", "mse", "mae", "w1", "w2"]
+
+    conditions = sorted(metrics_df[condition_col].astype(str).unique().tolist())
+    timepoints = sorted(metrics_df[time_col].astype(float).unique().tolist())
+    nrows, ncols = 2, 3
+    fig, axes = plt.subplots(nrows, ncols, figsize=(18, 10))
+
+    for ax, metric in zip(axes.ravel(), metric_order):
+        pivot = (
+            metrics_df.assign(
+                _condition=metrics_df[condition_col].astype(str),
+                _time=metrics_df[time_col].astype(float),
+            )
+            .pivot(index="_condition", columns="_time", values=metric)
+            .reindex(index=conditions, columns=timepoints)
+        )
+        if metric in {"r2", "pcc"}:
+            cmap = "vlag"
+            vmin, vmax = -1.0, 1.0
+        else:
+            cmap = "mako"
+            vmin = vmax = None
+
+        sns.heatmap(
+            pivot,
+            ax=ax,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            annot=True,
+            fmt=".3f",
+            linewidths=0.5,
+            linecolor="white",
+            cbar=True,
+            square=False,
+        )
+        ax.set_title(metric.upper())
+        ax.set_xlabel("Target timepoint")
+        ax.set_ylabel("Condition")
+
+    if title is not None:
+        fig.suptitle(title)
+    plt.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)

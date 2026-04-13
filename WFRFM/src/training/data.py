@@ -13,7 +13,7 @@ class DataLoaderHelper:
                  sample_rep='X_pca_scaled',
                  condition_keys="target_gene",
                  condition_rep_keys="gene_embeddings"):
-        
+        self.multi_marginal = False
         self.X_control = adata_control.obsm[sample_rep]
         self.X_treated_all = adata_treated.obsm[sample_rep]
 
@@ -38,9 +38,112 @@ class DataLoaderHelper:
         print("data_loaded")
 
 
+class MultiMarginalDataLoaderHelper:
+    """
+    用于 multi-marginal 训练的数据缓存。
+    每个 condition 下会保存多段相邻 marginal 的 OT 结果，并在训练时逐段采样。
+    """
+
+    def __init__(
+        self,
+        adata_control,
+        adata_treated,
+        precomputed_results,
+        sample_rep='X_pca_scaled',
+        condition_keys="target_gene",
+        condition_rep_keys="gene_embeddings",
+    ):
+        if not precomputed_results.get("multi_marginal", False):
+            raise ValueError("precomputed_results is not marked as multi_marginal")
+
+        self.multi_marginal = True
+        self.X_control = adata_control.obsm[sample_rep]
+        self.X_treated_all = adata_treated.obsm[sample_rep]
+        self.delta = precomputed_results["delta"]
+        self.gamma0_plans = precomputed_results["gamma0_plans"]
+        self.gamma1_plans = precomputed_results["gamma1_plans"]
+        self.condition_to_pair_ids = precomputed_results["condition_to_pair_ids"]
+        self.pair_records = {
+            record["pair_id"]: record
+            for record in precomputed_results["pair_records"]
+        }
+
+        explicit_condition_emb_map = precomputed_results.get("condition_emb_map")
+        if explicit_condition_emb_map is not None:
+            self.condition_emb_map = {
+                str(condition): np.asarray(embedding, dtype=np.float32)
+                for condition, embedding in explicit_condition_emb_map.items()
+            }
+        else:
+            self.condition_emb_map = {}
+            unique_cons = adata_treated.obs[condition_keys].unique()
+            for con in unique_cons:
+                idx = np.where(adata_treated.obs[condition_keys] == con)[0][0]
+                self.condition_emb_map[con] = adata_treated.obsm[condition_rep_keys][idx]
+
+        self.control_obs_index = {
+            obs_name: idx for idx, obs_name in enumerate(adata_control.obs_names)
+        }
+        self.treated_obs_index = {
+            obs_name: idx for idx, obs_name in enumerate(adata_treated.obs_names)
+        }
+
+        self.pair_index_cache = {}
+        for pair_id, record in self.pair_records.items():
+            if record["source_dataset"] == "control":
+                source_index = _obs_names_to_indices(
+                    record["source_obs_names"], self.control_obs_index
+                )
+            else:
+                source_index = _obs_names_to_indices(
+                    record["source_obs_names"], self.treated_obs_index
+                )
+            if record.get("target_dataset", "treated") == "control":
+                target_index = _obs_names_to_indices(
+                    record["target_obs_names"], self.control_obs_index
+                )
+            else:
+                target_index = _obs_names_to_indices(
+                    record["target_obs_names"], self.treated_obs_index
+                )
+            self.pair_index_cache[pair_id] = {
+                "source": source_index,
+                "target": target_index,
+            }
+
+        self.all_conditions = [
+            condition
+            for condition, pair_ids in self.condition_to_pair_ids.items()
+            if pair_ids
+        ]
+
+        print("multi_marginal_data_loaded")
+
+
 def sample_from_ot_plan(ot_plan, x0, x1, batch_size = 256):
     i, j = sample_map(ot_plan, batch_size, replace=True)
     return x0[i], x1[j], i, j  # 只返回索引 i
+
+
+def _sample_conditions(all_conditions, batch_size_condition):
+    sample_size = min(batch_size_condition, len(all_conditions))
+    if sample_size == 0:
+        raise ValueError("No conditions available for batch sampling")
+    return random.sample(all_conditions, sample_size)
+
+
+def _obs_names_to_indices(obs_names, index_map):
+    return np.fromiter(
+        (index_map[obs_name] for obs_name in obs_names),
+        dtype=np.int64,
+        count=len(obs_names),
+    )
+
+
+def _matrix_values_at(plan, idx_0, idx_1):
+    if sparse.issparse(plan):
+        return np.asarray(plan[idx_0, idx_1]).reshape(-1, 1)
+    return plan[idx_0, idx_1].reshape(-1, 1)
 
 def sample_map(pi, batch_size, replace=True):
     """
@@ -72,9 +175,12 @@ def sample_map(pi, batch_size, replace=True):
         return i, j
 
 
-def compute_xt_ut_gt(t_samp, x0, x1, mass0, mass1, delta):
+def compute_xt_ut_gt(t_samp, x0, x1, mass0, mass1, delta, delta_t=1.0):
 
     EPS = 1e-9
+    delta_t = float(delta_t)
+    if delta_t <= 0:
+        raise ValueError("delta_t must be positive")
   
     index = torch.norm(x1 - x0, dim=1) < (torch.pi * delta * 0.99)
     # print(torch.sum(index).item()/len(index))
@@ -128,8 +234,8 @@ def compute_xt_ut_gt(t_samp, x0, x1, mass0, mass1, delta):
     masst_samp = torch.clamp(masst_samp, min=EPS)
   
     dmasst_dt = (2*A*t_samp - 2*B)
-    gt_samp = dmasst_dt / masst_samp
-    ut_samp = omega_vector / masst_samp
+    gt_samp = dmasst_dt / masst_samp / delta_t
+    ut_samp = omega_vector / masst_samp / delta_t
     # 怀疑这里是数值不稳定的一大原因 实验发现gt和ut经常会变成inf导致loss变成nan
 
     return xt_samp, gt_samp, ut_samp, masst_samp/mass0, index
@@ -146,7 +252,7 @@ def get_batch(helper, #  DataLoaderHelper
 
     ts, xts, uts, gts, massts, cons = [], [], [], [], [], []
     
-    sample_con_names = random.sample(helper.all_conditions, batch_size_condition)
+    sample_con_names = _sample_conditions(helper.all_conditions, batch_size_condition)
     for cur_con in sample_con_names:
         gamma0_plan = helper.gamma0_plans[cur_con]
         gamma1_plan = helper.gamma1_plans[cur_con]
@@ -164,14 +270,8 @@ def get_batch(helper, #  DataLoaderHelper
         x0_tensor = torch.from_numpy(x0).float().to(device)
         x1_tensor = torch.from_numpy(x1).float().to(device)
 
-        if sparse.issparse(gamma0_plan):
-            m0_val = np.asarray(gamma0_plan[idx_0, idx_1]).reshape(-1, 1)
-        else:
-            m0_val = gamma0_plan[idx_0, idx_1].reshape(-1, 1)
-        if sparse.issparse(gamma1_plan):
-            m1_val = np.asarray(gamma1_plan[idx_0, idx_1]).reshape(-1, 1)
-        else:
-            m1_val = gamma1_plan[idx_0, idx_1].reshape(-1, 1)
+        m0_val = _matrix_values_at(gamma0_plan, idx_0, idx_1)
+        m1_val = _matrix_values_at(gamma1_plan, idx_0, idx_1)
         
         mass0 = torch.from_numpy(m0_val).float().to(device)
         mass1 = torch.from_numpy(m1_val).float().to(device)
@@ -196,3 +296,107 @@ def get_batch(helper, #  DataLoaderHelper
 
     return (torch.cat(ts), torch.cat(xts), torch.cat(uts), 
             torch.cat(gts), torch.cat(massts), torch.cat(cons))
+
+
+def get_batch_multi_marginal(
+    helper,
+    batch_size_per_condition,
+    batch_size_condition,
+    delta,
+    device,
+):
+    """
+    multi-marginal 版本的 batch 采样。
+    对每个被采样的 condition，会遍历该 condition 下的所有相邻 marginal pair，
+    并返回绝对时间 t = t_start + delta_t * u。
+    """
+
+    ts, xts, uts, gts, massts, cons = [], [], [], [], [], []
+
+    sample_con_names = _sample_conditions(helper.all_conditions, batch_size_condition)
+    for cur_con in sample_con_names:
+        pair_ids = helper.condition_to_pair_ids[cur_con]
+        cur_emb_np = helper.condition_emb_map[cur_con]
+
+        for pair_id in pair_ids:
+            record = helper.pair_records[pair_id]
+            gamma0_plan = helper.gamma0_plans[pair_id]
+            gamma1_plan = helper.gamma1_plans[pair_id]
+            source_indices = helper.pair_index_cache[pair_id]["source"]
+            target_indices = helper.pair_index_cache[pair_id]["target"]
+
+            if record["source_dataset"] == "control":
+                x0_pool = helper.X_control[source_indices]
+            else:
+                x0_pool = helper.X_treated_all[source_indices]
+            if record.get("target_dataset", "treated") == "control":
+                x1_pool = helper.X_control[target_indices]
+            else:
+                x1_pool = helper.X_treated_all[target_indices]
+
+            x0, x1, idx_0, idx_1 = sample_from_ot_plan(
+                gamma0_plan,
+                x0_pool,
+                x1_pool,
+                batch_size_per_condition,
+            )
+
+            x0_tensor = torch.from_numpy(x0).float().to(device)
+            x1_tensor = torch.from_numpy(x1).float().to(device)
+            m0_val = _matrix_values_at(gamma0_plan, idx_0, idx_1)
+            m1_val = _matrix_values_at(gamma1_plan, idx_0, idx_1)
+
+            mass0 = torch.from_numpy(m0_val).float().to(device)
+            mass1 = torch.from_numpy(m1_val).float().to(device)
+            t_relative = torch.rand(x0_tensor.shape[0], 1, device=device)
+            delta_t = record["delta_t"]
+
+            xt_samp, gt_samp, ut_samp, masst_samp, index = compute_xt_ut_gt(
+                t_relative,
+                x0_tensor,
+                x1_tensor,
+                mass0,
+                mass1,
+                delta,
+                delta_t=delta_t,
+            )
+
+            ts.append(record["source_time"] + delta_t * t_relative[index])
+            xts.append(xt_samp)
+            uts.append(ut_samp)
+            gts.append(gt_samp)
+            massts.append(masst_samp)
+
+            cur_con_tensor = torch.tensor(cur_emb_np, dtype=torch.float32, device=device)
+            cur_con_tensor = cur_con_tensor.unsqueeze(0).repeat(len(xt_samp), 1)
+            cons.append(cur_con_tensor)
+
+    if not ts:
+        raise ValueError("No valid multi-marginal samples were generated")
+
+    return (
+        torch.cat(ts),
+        torch.cat(xts),
+        torch.cat(uts),
+        torch.cat(gts),
+        torch.cat(massts),
+        torch.cat(cons),
+    )
+
+
+def sample_training_batch(helper, batch_size_per_condition, batch_size_condition, delta, device):
+    if getattr(helper, "multi_marginal", False):
+        return get_batch_multi_marginal(
+            helper,
+            batch_size_per_condition=batch_size_per_condition,
+            batch_size_condition=batch_size_condition,
+            delta=delta,
+            device=device,
+        )
+    return get_batch(
+        helper,
+        batch_size_per_condition=batch_size_per_condition,
+        batch_size_condition=batch_size_condition,
+        delta=delta,
+        device=device,
+    )

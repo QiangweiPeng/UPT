@@ -4,12 +4,10 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import anndata as ad
 import scanpy as sc
-import scvi
 import os
 
 from .utils import convert_mixed_array_to_2d
 from .pca import centered_pca, project_pca, reconstruct_pca
-from .flatvi_wrapper import FlatVIEmbedding
 
 def process_to_embedding(adata_control, adata_train, 
                          adata_test = None,
@@ -63,6 +61,7 @@ def process_to_embedding(adata_control, adata_train,
             print(np.std(np.array(adata_test.obsm[sample_rep + "_scaled"]), axis=0))
 
     elif sample_rep == "X_scVI":
+        import scvi
 
         scvi.settings.dl_num_workers = 12
         if model_ref is None:
@@ -117,6 +116,8 @@ def process_to_embedding(adata_control, adata_train,
             print("Test Std:", np.std(adata_test.obsm[sample_rep], axis=0))
 
     elif sample_rep == "X_flatvi":
+        from .flatvi_wrapper import FlatVIEmbedding
+
         if flatvi_kwargs is None:
             flatvi_kwargs = {
                 'n_latent': n_comps,
@@ -152,6 +153,7 @@ def process_to_embedding(adata_control, adata_train,
         model_ref = flatvi_model
 
     elif sample_rep == "X_scVI_linear":
+        import scvi
 
         scvi.settings.dl_num_workers = 12
         if model_ref is None:
@@ -221,4 +223,3 @@ def process_to_embedding(adata_control, adata_train,
     
     
     return adata_control, adata_train, adata_test, model_ref, model_train, model_test
-
