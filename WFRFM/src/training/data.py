@@ -5,6 +5,58 @@ from scipy import sparse
 
 import numpy as np
 
+import ast
+
+def get_condition_embedding(
+    adata,
+    condition,
+    condition_rep_keys,
+    condition_keys=None,
+    strict=True,
+):
+    condition = str(condition).strip()
+
+    # 新逻辑：优先从 uns 的 dict 查
+    if condition_rep_keys in adata.uns:
+        rep_dict = adata.uns[condition_rep_keys]
+        if condition in rep_dict:
+            return np.asarray(rep_dict[condition], dtype=np.float32)
+
+        if strict:
+            raise KeyError(
+                f"Condition '{condition}' not found in adata.uns['{condition_rep_keys}']"
+            )
+        return None
+
+    # 兼容旧逻辑：只有在 obsm 还存在时才回退
+    if condition_rep_keys in adata.obsm:
+        if condition_keys is None or condition_keys not in adata.obs.columns:
+            if strict:
+                raise ValueError(
+                    f"Cannot recover condition embedding from obsm because "
+                    f"'{condition_keys}' is not in adata.obs"
+                )
+            return None
+
+        cond_series = adata.obs[condition_keys].astype(str).str.strip()
+        idx = np.where(cond_series.values == condition)[0]
+        if len(idx) == 0:
+            if strict:
+                raise KeyError(
+                    f"Condition '{condition}' not found in adata.obs['{condition_keys}']"
+                )
+            return None
+
+        return adata.obsm[condition_rep_keys][idx[0]]
+
+    if strict:
+        raise KeyError(
+            f"Neither adata.uns['{condition_rep_keys}'] nor adata.obsm['{condition_rep_keys}'] exists"
+        )
+    return None
+
+
+
 class DataLoaderHelper:
     """
     基于 Global Rulebook 和 Tuple Identity 的训练数据辅助类。
@@ -13,6 +65,7 @@ class DataLoaderHelper:
     def __init__(self, adata_control, adata_treated, 
                  precomputed_results, 
                  sample_rep='X_pca_scaled',
+                 condition_keys="cytokine",
                  condition_rep_keys="gene_embeddings"):
         
         self.rulebook = adata_treated.uns.get('global_rulebook')
@@ -65,13 +118,22 @@ class DataLoaderHelper:
             
             self.control_indices_dict[con] = c_indices
             self.treated_indices_dict[con] = t_indices
-            
+
             # 提取 condition embedding
-            if condition_rep_keys in adata_treated.obsm:
-                first_t_idx = t_indices[0]
-                self.condition_emb_map[con] = adata_treated.obsm[condition_rep_keys][first_t_idx]
-            else:
-                self.condition_emb_map[con] = None 
+            con_tuple = ast.literal_eval(con) if isinstance(con, str) else con
+            self.condition_emb_map[con] = get_condition_embedding(
+                adata=adata_treated,
+                condition=con_tuple[0], #先这么修吧
+                condition_rep_keys=condition_rep_keys,
+                strict = True,
+            )
+
+            # # 提取 condition embedding
+            # if condition_rep_keys in adata_treated.obsm:
+            #     first_t_idx = t_indices[0]
+            #     self.condition_emb_map[con] = adata_treated.obsm[condition_rep_keys][first_t_idx]
+            # else:
+            #     self.condition_emb_map[con] = None 
                 
         print("DataLoaderHelper 构建完成！")
 

@@ -198,8 +198,59 @@ import os
 import numpy as np
 import scvi
 
+import numpy as np
+
+def get_condition_embedding(
+    adata,
+    condition,
+    condition_rep_keys,
+    condition_keys=None,
+    strict=True,
+):
+    condition = str(condition).strip()
+
+    # 新逻辑：优先从 uns 的 dict 查
+    if condition_rep_keys in adata.uns:
+        rep_dict = adata.uns[condition_rep_keys]
+        if condition in rep_dict:
+            return np.asarray(rep_dict[condition], dtype=np.float32)
+
+        if strict:
+            raise KeyError(
+                f"Condition '{condition}' not found in adata.uns['{condition_rep_keys}']"
+            )
+        return None
+
+    # 兼容旧逻辑：只有在 obsm 还存在时才回退
+    if condition_rep_keys in adata.obsm:
+        if condition_keys is None or condition_keys not in adata.obs.columns:
+            if strict:
+                raise ValueError(
+                    f"Cannot recover condition embedding from obsm because "
+                    f"'{condition_keys}' is not in adata.obs"
+                )
+            return None
+
+        cond_series = adata.obs[condition_keys].astype(str).str.strip()
+        idx = np.where(cond_series.values == condition)[0]
+        if len(idx) == 0:
+            if strict:
+                raise KeyError(
+                    f"Condition '{condition}' not found in adata.obs['{condition_keys}']"
+                )
+            return None
+
+        return adata.obsm[condition_rep_keys][idx[0]]
+
+    if strict:
+        raise KeyError(
+            f"Neither adata.uns['{condition_rep_keys}'] nor adata.obsm['{condition_rep_keys}'] exists"
+        )
+    return None
+
+
+
 def run_inference_and_reconstruct(
-    *,
     model,
     adata_control,
     adata_test,
@@ -213,27 +264,40 @@ def run_inference_and_reconstruct(
     n_steps: int = 50,
     scvi_model_load_path: str = None,
     state_model_load_path: str = None,
+    source_celltype_key: str | None = None,
 ):
-    """
-    模块一：执行采样、模型推理(Latent Space)以及基因表达重建。
-    返回包含预测 Latent 和预测 Genes 的数据字典。
-    """
+
     if not wishlist:
         print("wishlist is empty")
-        return None, None
+        return None, None, None
 
     # ---- 1. 解析法典与构建 Embedding 字典 ----
-    rulebook = adata_test.uns.get('global_rulebook')
+    rulebook = adata_test.uns.get("global_rulebook")
     if rulebook is None:
         raise ValueError("adata_test.uns 缺少 'global_rulebook'。请先运行 prepare_covariates。")
 
     condition_embeddings = {}
+
     for adata in [adata_control, adata_test]:
-        if condition_rep_keys in adata.obsm:
-            for pert in adata.obs[condition_keys].unique():
-                if pert not in condition_embeddings:
-                    idx = np.where(adata.obs[condition_keys] == pert)[0][0]
-                    condition_embeddings[pert] = adata.obsm[condition_rep_keys][idx]
+        if adata is None:
+            continue
+        if condition_keys not in adata.obs.columns:
+            continue
+
+        for pert in adata.obs[condition_keys].astype(str).str.strip().unique():
+            if pert in condition_embeddings:
+                continue
+
+            emb = get_condition_embedding(
+                adata=adata,
+                condition=pert,
+                condition_rep_keys=condition_rep_keys,
+                condition_keys=condition_keys,
+                strict=False,
+            )
+
+            if emb is not None:
+                condition_embeddings[pert] = emb
 
     # ---- 2. 采样起点细胞 X_0 ----
     all_indices = np.arange(adata_control.n_obs)
@@ -247,6 +311,7 @@ def run_inference_and_reconstruct(
 
     # ---- 3. Inference (Latent Space) ----
     print(f"Starting inference for {len(wishlist)} conditions...")
+
     results_embedding = run_batch_inference(
         model=model,
         adata_source=adata_source_subset,
@@ -256,7 +321,8 @@ def run_inference_and_reconstruct(
         condition_key_name=condition_keys,
         sample_rep=sample_rep,
         n_steps=n_steps,
-        device=device
+        device=device,
+        source_celltype_key=source_celltype_key,
     )
 
     # ---- 4. Reconstruct (Gene Expression) ----
@@ -265,44 +331,54 @@ def run_inference_and_reconstruct(
 
     if sample_rep in ["X_pca_scaled", "X_pca"]:
         results_genes = batch_reconstruct_pca(
-            inference_results=results_embedding,  
-            ref_adata=adata_control        
+            inference_results=results_embedding,
+            ref_adata=adata_control,
         )
+
     elif sample_rep in ["X_scVI"]:
         model_ref = scvi.model.SCVI.load(f"{scvi_model_load_path}_ref", adata=adata_control)
         results_genes = batch_reconstruct_scvi(
             inference_results=results_embedding,
-            scvi_model=model_ref,  
-            target_library_size=1e4, 
-            batch_idx=None, 
+            scvi_model=model_ref,
+            target_library_size=1e4,
+            batch_idx=None,
         )
+
     elif sample_rep == "X_flatvi":
         model_ref = scvi.model.SCVI.load(f"{scvi_model_load_path}_ref", adata=adata_control)
         results_genes = batch_reconstruct_flatvi(
             inference_results=results_embedding,
             flatvi_model=model_ref,
             target_library_size=1e4,
-            var_names=adata_control.var_names
+            var_names=adata_control.var_names,
         )
+
     elif sample_rep == "X_state":
         from src.preprocessing import NBDecoder, NBDecoderTrainer
+
         z_dim = adata_control.obsm["X_state"].shape[1]
         n_genes = adata_control.n_vars
-        state_decoder = NBDecoder(z_dim=z_dim, n_genes=n_genes, hidden=(1024,2048,4096), dropout=0.1)
+        state_decoder = NBDecoder(
+            z_dim=z_dim,
+            n_genes=n_genes,
+            hidden=(1024, 2048, 4096),
+            dropout=0.1,
+        )
         trainer = NBDecoderTrainer(state_decoder, device=device, use_amp=False)
-        trainer.load(state_model_load_path)  
+        trainer.load(state_model_load_path)
         state_decoder = trainer.decoder
         state_decoder.eval()
-        
+
         results_genes = batch_reconstruct_state(
             inference_results=results_embedding,
             state_decoder=state_decoder,
             target_library_size=1e4,
-            var_names=adata_control.var_names
+            var_names=adata_control.var_names,
         )
 
     print("Inference and reconstruction completed.")
     return results_embedding, results_genes, indices
+
 
 
 import numpy as np
@@ -499,7 +575,9 @@ def evaluate_generated_results(
     final_filename: str = "final_metrics.csv",
     detailed_perturbation: bool = True,
     use_groupwise_control: bool = True,
-    cell_type_key:str | None =None,   # 这里更适合是 str / None，不是 bool
+    cell_type_key:str | None =None,  
+    celltype_transition_rules: dict | None =None,
+    celltype_transition_unknown_policy: str ="same_only",
     detailed_celltype: bool = False,
 ):
     """
@@ -592,12 +670,15 @@ def evaluate_generated_results(
             embedding_key=sample_rep,
             rulebook=rulebook,
             use_groupwise_control=use_groupwise_control,
+            min_cells_threshold=10,
             random_seed=random_seed,
             distribution_sample_num=Edistance_sample_num,
             top_n_degs=dist_top_n_degs,
             deg_padj_cutoff=deg_padj_cutoff,
             deg_fc_cutoff=deg_fc_cutoff,
             deg_top_n_for_eval=deg_top_n_for_eval,
+            celltype_transition_rules=celltype_transition_rules,
+            celltype_transition_unknown_policy=celltype_transition_unknown_policy,
         )
 
         # 3. 保存
@@ -677,3 +758,150 @@ def evaluate_generated_results(
 
     return final_df, artifacts
 
+
+from .wfr_multitime_umap_helper import (
+    run_batch_inference_with_traj,
+    fit_umap_reducer,
+)
+
+def run_inference_only(
+    model,
+    adata_control,
+    adata_test,
+    wishlist,
+    condition_keys,
+    condition_rep_keys,
+    sample_rep,
+    device,
+    n_particles: int = 10000,
+    random_seed: int = 42,
+    n_steps: int = 50,
+    scvi_model_load_path: str = None,   # 保留接口兼容，实际不再使用
+    state_model_load_path: str = None,  # 保留接口兼容，实际不再使用
+    source_celltype_key: str | None = None,
+
+    # latent trajectory / UMAP
+    return_traj: bool = True,
+    save_times: list[float] | tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0),
+    t_destiny: float = 1.0,
+    return_reducer: bool = False,
+    umap_n_neighbors: int = 30,
+    umap_min_dist: float = 0.35,
+    umap_random_state: int = 0,
+
+    # 新增：支持 all / v_only / g_only
+    inference_modes: tuple[str, ...] = ("all", "v_only", "g_only"),
+):
+    """
+    精简版：
+    - 只做 latent space inference
+    - 可返回多时间点 trajectory
+    - 可返回 UMAP reducer
+    - 不做 gene reconstruction
+
+    Returns
+    -------
+    若 return_traj or return_reducer:
+        results_embedding, None, indices, reducer
+
+    否则:
+        results_embedding, None, indices
+    """
+    import numpy as np
+
+    if not wishlist:
+        print("wishlist is empty")
+        if return_traj or return_reducer:
+            return None, None, None, None
+        return None, None, None
+
+    rulebook = adata_test.uns.get("global_rulebook")
+    if rulebook is None:
+        raise ValueError("adata_test.uns 缺少 'global_rulebook'。请先运行 prepare_covariates。")
+
+    # ---- 1. 构建 perturbation embedding 字典 ----
+    condition_embeddings = {}
+
+    for adata in [adata_control, adata_test]:
+        if adata is None:
+            continue
+        if condition_keys not in adata.obs.columns:
+            continue
+
+        for pert in adata.obs[condition_keys].astype(str).str.strip().unique():
+            if pert in condition_embeddings:
+                continue
+
+            emb = get_condition_embedding(
+                adata=adata,
+                condition=pert,
+                condition_rep_keys=condition_rep_keys,
+                condition_keys=condition_keys,
+                strict=False,
+            )
+
+            if emb is not None:
+                condition_embeddings[pert] = emb
+
+    # ---- 2. 采样 control cells 作为起点 ----
+    all_indices = np.arange(adata_control.n_obs)
+    rng = np.random.default_rng(random_seed)
+
+    indices = (
+        rng.choice(all_indices, n_particles, replace=False)
+        if n_particles < len(all_indices)
+        else all_indices
+    )
+    adata_source_subset = adata_control[indices].copy()
+
+    # ---- 3. latent inference ----
+    print(f"Starting latent inference for {len(wishlist)} conditions...")
+
+    if return_traj:
+        results_embedding = run_batch_inference_with_traj(
+            model=model,
+            adata_source=adata_source_subset,
+            rulebook=rulebook,
+            wishlist=wishlist,
+            condition_embeddings=condition_embeddings,
+            condition_key_name=condition_keys,
+            sample_rep=sample_rep,
+            n_steps=n_steps,
+            device=device,
+            source_celltype_key=source_celltype_key,
+            t_destiny=t_destiny,
+            save_times=save_times,
+            modes=inference_modes,
+        )
+    else:
+        results_embedding = run_batch_inference(
+            model=model,
+            adata_source=adata_source_subset,
+            rulebook=rulebook,
+            wishlist=wishlist,
+            condition_embeddings=condition_embeddings,
+            condition_key_name=condition_keys,
+            sample_rep=sample_rep,
+            n_steps=n_steps,
+            device=device,
+            source_celltype_key=source_celltype_key,
+        )
+
+    # ---- 4. fit UMAP reducer（可选）----
+    reducer = None
+    if return_reducer:
+        reducer = fit_umap_reducer(
+            adata_source=adata_source_subset,
+            sample_rep=sample_rep,
+            n_neighbors=umap_n_neighbors,
+            min_dist=umap_min_dist,
+            random_state=umap_random_state,
+        )
+
+    print("Latent inference completed.")
+
+    # 不再做 gene reconstruction，为了兼容旧接口，第二个返回值仍然给 None
+    if return_traj or return_reducer:
+        return results_embedding, None, indices, reducer
+
+    return results_embedding, None, indices

@@ -50,12 +50,14 @@ def run_batch_inference(
     condition_key_name: str = "perturbation", 
     sample_rep: str = "X_pca_scaled",
     n_steps: int = 50,
-    device: str = "cuda"
+    device: str = "cuda", 
+    source_celltype_key: str | None = None,
+    t_destiny: float = 1.0,
 ) -> dict:
     
     model.eval()
     model.to(device)
-    dt = 1.0 / n_steps
+    dt = t_destiny / n_steps
     results = {}
 
     print(f"准备为 {len(wishlist)} 个条件进行推理...")
@@ -89,6 +91,13 @@ def run_batch_inference(
         if len(adata_source_cur) == 0:
             print(f"\n⚠️ 警告: 找不到匹配的 Control 细胞作为起点，已跳过条件: {cond_name}")
             continue
+
+        source_celltype = None
+        if source_celltype_key is not None and source_celltype_key in adata_source_cur.obs.columns:
+            source_celltype = adata_source_cur.obs[source_celltype_key].astype(str).to_numpy()
+        
+        source_obs_names = adata_source_cur.obs_names.astype(str).to_numpy()
+
 
         # 动态提取当前批次的 z0 和 Batch Size
         z0_np = adata_source_cur.obsm[sample_rep]
@@ -160,7 +169,9 @@ def run_batch_inference(
         # (D) 保存结果
         results[cond_name] = {
             'z_pred': z_pred.cpu().numpy(),
-            'm_pred': m_pred.cpu().numpy()
+            'm_pred': m_pred.cpu().numpy(),
+            "source_celltype": source_celltype,     
+            "source_obs_names": source_obs_names, 
         }
 
     return results

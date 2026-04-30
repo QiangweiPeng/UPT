@@ -233,48 +233,91 @@ def process_to_embedding(adata_control, adata_train,
         raise ValueError("Unimplemented sample_rep")
         
 
-    if condition_rep_dict is not None: 
+    # if condition_rep_dict is not None: 
+    #     adata_train.obs[condition_keys] = adata_train.obs[condition_keys].astype(str).str.strip()
+    #     if adata_test is not None:
+    #         adata_test.obs[condition_keys] = adata_test.obs[condition_keys].astype(str).str.strip()
+            
+    #     unique_keys = set(adata_train.obs[condition_keys].unique())
+    #     if adata_test is not None:
+    #         unique_keys.update(adata_test.obs[condition_keys].unique())
+
+    #     extended_rep_dict = {}
+    #     for key in unique_keys:
+    #         if key in condition_rep_dict:
+    #             extended_rep_dict[key] = condition_rep_dict[key]
+    #         elif '+' in key: # 双扰动
+    #             genes = key.split('+')
+    #             if len(genes) == 2: #认为只有双敲
+    #                 g1, g2 = genes[0].strip(), genes[1].strip()
+    #                 if g1 == 'ctrl' and g2 in condition_rep_dict:
+    #                     extended_rep_dict[key] = condition_rep_dict[g2]
+    #                 elif g2 == 'ctrl' and g1 in condition_rep_dict:
+    #                     extended_rep_dict[key] = condition_rep_dict[g1]
+                    
+    #                 elif g1 in condition_rep_dict and g2 in condition_rep_dict:
+    #                     vec1 = np.array(condition_rep_dict[g1])
+    #                     vec2 = np.array(condition_rep_dict[g2])
+    #                     extended_rep_dict[key] = (vec1 + vec2)/2           
+    #                 else:
+    #                     raise KeyError(f"Components of '{key}' not found in condition_rep_dict")
+    #             else:
+    #                  pass 
+    #         else:
+    #             raise KeyError(f"Key '{key}' not found in condition_rep_dict")
+
+    #     temp = adata_train.obs[condition_keys].astype(str).map(extended_rep_dict).values
+    #     adata_train.obsm[condition_rep_keys] = convert_mixed_array_to_2d(temp) 
+        
+    #     if adata_test is not None:
+    #         temp = adata_test.obs[condition_keys].astype(str).map(extended_rep_dict).values
+    #         adata_test.obsm[condition_rep_keys] = convert_mixed_array_to_2d(temp)
+
+    # else:
+    #     raise ValueError("need condition_rep_dict")
+    if condition_rep_dict is not None:
         adata_train.obs[condition_keys] = adata_train.obs[condition_keys].astype(str).str.strip()
         if adata_test is not None:
             adata_test.obs[condition_keys] = adata_test.obs[condition_keys].astype(str).str.strip()
-            
+        if adata_control is not None:
+            adata_control.obs[condition_keys] = adata_control.obs[condition_keys].astype(str).str.strip()
+    
         unique_keys = set(adata_train.obs[condition_keys].unique())
         if adata_test is not None:
             unique_keys.update(adata_test.obs[condition_keys].unique())
-
+    
         extended_rep_dict = {}
         for key in unique_keys:
             if key in condition_rep_dict:
-                extended_rep_dict[key] = condition_rep_dict[key]
-            elif '+' in key: # 双扰动
+                extended_rep_dict[key] = np.asarray(condition_rep_dict[key], dtype=np.float32)
+            elif '+' in key:
                 genes = key.split('+')
-                if len(genes) == 2: #认为只有双敲
+                if len(genes) == 2:
                     g1, g2 = genes[0].strip(), genes[1].strip()
                     if g1 == 'ctrl' and g2 in condition_rep_dict:
-                        extended_rep_dict[key] = condition_rep_dict[g2]
+                        extended_rep_dict[key] = np.asarray(condition_rep_dict[g2], dtype=np.float32)
                     elif g2 == 'ctrl' and g1 in condition_rep_dict:
-                        extended_rep_dict[key] = condition_rep_dict[g1]
-                    
+                        extended_rep_dict[key] = np.asarray(condition_rep_dict[g1], dtype=np.float32)
                     elif g1 in condition_rep_dict and g2 in condition_rep_dict:
-                        vec1 = np.array(condition_rep_dict[g1])
-                        vec2 = np.array(condition_rep_dict[g2])
-                        extended_rep_dict[key] = (vec1 + vec2)/2           
+                        vec1 = np.asarray(condition_rep_dict[g1], dtype=np.float32)
+                        vec2 = np.asarray(condition_rep_dict[g2], dtype=np.float32)
+                        extended_rep_dict[key] = (vec1 + vec2) / 2
                     else:
                         raise KeyError(f"Components of '{key}' not found in condition_rep_dict")
                 else:
-                     pass 
+                    raise KeyError(f"Unexpected perturbation key: '{key}'")
             else:
                 raise KeyError(f"Key '{key}' not found in condition_rep_dict")
-
-        temp = adata_train.obs[condition_keys].astype(str).map(extended_rep_dict).values
-        adata_train.obsm[condition_rep_keys] = convert_mixed_array_to_2d(temp) 
-        
+    
+        adata_train.uns[condition_rep_keys] = extended_rep_dict
         if adata_test is not None:
-            temp = adata_test.obs[condition_keys].astype(str).map(extended_rep_dict).values
-            adata_test.obsm[condition_rep_keys] = convert_mixed_array_to_2d(temp)
-
+            adata_test.uns[condition_rep_keys] = extended_rep_dict
+        if adata_control is not None:
+            adata_control.uns[condition_rep_keys] = extended_rep_dict
+    
     else:
         raise ValueError("need condition_rep_dict")
+
 
 
     

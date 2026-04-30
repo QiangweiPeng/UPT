@@ -27,6 +27,8 @@ WFRFM/lightning_logs/*
 WFRFM/trash/*
 WFRFM/*.ipynb
 
+CellFlow/
+
 **/cache/
 **/.ipynb_checkpoints/
 **/__pycache__/

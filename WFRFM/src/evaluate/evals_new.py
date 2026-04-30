@@ -339,6 +339,184 @@ def compute_celltype_proportion_metrics(
     return metrics, detail_df
 
 
+def _get_transition_rule_for_source(
+    source_ct,
+    perturbation,
+    transition_rules,
+):
+    if transition_rules is None:
+        return None
+
+    source_ct = str(source_ct)
+    perturbation = None if perturbation is None else str(perturbation)
+
+    per_pert = transition_rules.get("per_perturbation", {})
+    global_rules = transition_rules.get("global", {})
+
+    # 1) perturbation-specific source rule
+    if perturbation is not None and perturbation in per_pert:
+        local_rules = per_pert[perturbation]
+        if source_ct in local_rules:
+            return local_rules[source_ct]
+        if "__default__" in local_rules:
+            return local_rules["__default__"]
+
+    # 2) global source rule
+    if source_ct in global_rules:
+        return global_rules[source_ct]
+    if "__default__" in global_rules:
+        return global_rules["__default__"]
+
+    return None
+
+
+def _normalize_transition_rule(rule, source_ct):
+    """
+    返回:
+      - allowed_targets: set[str] 或 None
+      - mode: "explicit" / "allow_all" / "unknown"
+    """
+    source_ct = str(source_ct)
+
+    if rule is None:
+        return None, "unknown"
+
+    if isinstance(rule, (list, tuple, set)):
+        return set(map(str, rule)), "explicit"
+
+    if not isinstance(rule, dict):
+        raise TypeError(f"Unsupported transition rule type: {type(rule)}")
+
+    policy = rule.get("policy", None)
+
+    if policy == "same_only":
+        return {source_ct}, "explicit"
+
+    if policy == "allow_all":
+        return None, "allow_all"
+
+    if policy == "ignore":
+        return None, "unknown"
+
+    if "allowed_targets" in rule:
+        allowed = set(map(str, rule["allowed_targets"]))
+        if rule.get("include_self", True):
+            allowed.add(source_ct)
+        return allowed, "explicit"
+
+    raise ValueError(f"Invalid transition rule for source '{source_ct}': {rule}")
+
+    
+def _judge_single_transition(
+    source_ct,
+    pred_ct,
+    perturbation=None,
+    transition_rules=None,
+    unknown_policy="same_only",
+):
+    source_ct = str(source_ct)
+    pred_ct = str(pred_ct)
+
+    # 不变不算 wrong change
+    if source_ct == pred_ct:
+        return "no_change"
+
+    rule = _get_transition_rule_for_source(
+        source_ct=source_ct,
+        perturbation=perturbation,
+        transition_rules=transition_rules,
+    )
+
+    if rule is None:
+        rule = {"policy": unknown_policy}
+
+    allowed_targets, mode = _normalize_transition_rule(rule, source_ct)
+
+    if mode == "unknown":
+        return "unknown"
+
+    if mode == "allow_all":
+        return "allowed"
+
+    return "allowed" if pred_ct in allowed_targets else "forbidden"
+
+def compute_celltype_change_metrics(
+    y_source,
+    y_pred,
+    pred_mass,
+    perturbation=None,
+    transition_rules=None,
+    unknown_policy="same_only",
+    eps=1e-12,
+):
+    y_source = np.asarray(y_source).astype(str)
+    y_pred = np.asarray(y_pred).astype(str)
+    w_pred = _sanitize_mass(pred_mass, len(y_pred))
+
+    if len(y_source) != len(y_pred):
+        raise ValueError(
+            f"Length mismatch: len(y_source)={len(y_source)} != len(y_pred)={len(y_pred)}"
+        )
+
+    total_mass = max(w_pred.sum(), eps)
+
+    statuses = np.array([
+        _judge_single_transition(
+            source_ct=s,
+            pred_ct=p,
+            perturbation=perturbation,
+            transition_rules=transition_rules,
+            unknown_policy=unknown_policy,
+        )
+        for s, p in zip(y_source, y_pred)
+    ], dtype=object)
+
+    changed = (y_source != y_pred)
+    allowed_change = (statuses == "allowed")
+    wrong_change = (statuses == "forbidden")
+    unknown_change = (statuses == "unknown")
+
+    changed_mass = w_pred[changed].sum()
+    allowed_change_mass = w_pred[allowed_change].sum()
+    wrong_change_mass = w_pred[wrong_change].sum()
+    unknown_change_mass = w_pred[unknown_change].sum()
+
+    judged_change_mass = allowed_change_mass + wrong_change_mass
+
+    detail_df = pd.DataFrame({
+        "source_celltype": y_source,
+        "pred_celltype": y_pred,
+        "pred_mass": w_pred,
+        "transition_status": statuses,
+        "is_changed": changed,
+    })
+
+    pair_df = (
+        detail_df.groupby(
+            ["source_celltype", "pred_celltype", "transition_status"],
+            dropna=False
+        )["pred_mass"]
+        .sum()
+        .reset_index()
+    )
+    pair_df["pred_prop_mass"] = pair_df["pred_mass"] / total_mass
+
+    metrics = {
+        "celltype_change_mass_ratio": float(changed_mass / total_mass),
+        "celltype_allowed_change_mass_ratio": float(allowed_change_mass / total_mass),
+        "celltype_wrong_change_mass_ratio": float(wrong_change_mass / total_mass),
+        "celltype_unknown_change_mass_ratio": float(unknown_change_mass / total_mass),
+        "celltype_wrong_change_given_change_mass_ratio": float(
+            wrong_change_mass / max(changed_mass, eps)
+        ),
+        "celltype_wrong_change_given_judged_change_mass_ratio": float(
+            wrong_change_mass / max(judged_change_mass, eps)
+        ),
+    }
+
+    return metrics, pair_df
+
+
 
 # =========================
 # wasserstein helper
@@ -966,6 +1144,7 @@ def evaluate_population_average(
 
         row["m_true_change"] = m_true_change
         row["m_pred_change"] = m_pred_change
+        row["mass_mse"] = np.mean((m_true_change - m_pred_change) ** 2)
 
         metrics_list.append(row)
 
@@ -1084,7 +1263,7 @@ def evaluate_stratified_by_celltype(
     embedding_key="sample_rep_scaled",
     rulebook=None,
     use_groupwise_control=True,
-    min_cells_threshold=1,
+    min_cells_threshold=10,
     random_seed=42,
     distribution_sample_num=500,
     top_n_degs=200,
@@ -1092,6 +1271,8 @@ def evaluate_stratified_by_celltype(
     deg_fc_cutoff=1.0,
     deg_top_n_for_eval=50,
     device="cuda" if torch.cuda.is_available() else "cpu",
+    celltype_transition_rules=None,
+    celltype_transition_unknown_policy="same_only",
 ):
     metrics_list = []
     pert_level_celltype_metrics = []
@@ -1135,15 +1316,36 @@ def evaluate_stratified_by_celltype(
 
         y_true_global = adata_true_pert.obs[cell_type_key].astype(str).values
         true_mass_global = adata_true_pert.obs["mass"].values if "mass" in adata_true_pert.obs.columns else None
-
+        source_ct_global = results_embedding[pert].get("source_celltype", None)
+        
         ct_prop_metrics, _ = compute_celltype_proportion_metrics(
             y_true=y_true_global,
             y_pred=y_pred_global,
             pred_mass=Z_m_pred_global,
             true_mass=true_mass_global,
         )
+
+        if source_ct_global is not None:
+            ct_change_metrics, ct_change_pair_df = compute_celltype_change_metrics(
+                y_source=source_ct_global,
+                y_pred=y_pred_global,
+                pred_mass=Z_m_pred_global,
+                perturbation=pert,
+                transition_rules=celltype_transition_rules,
+                unknown_policy=celltype_transition_unknown_policy,
+            )
+        else:
+            ct_change_metrics = {
+                "celltype_change_mass_ratio": np.nan,
+                "celltype_change_count_ratio": np.nan,
+                "celltype_wrong_change_mass_ratio": np.nan,
+                "celltype_wrong_change_given_change_mass_ratio": np.nan,
+            }
+        
+        ct_prop_metrics.update(ct_change_metrics)
         ct_prop_metrics["perturbation"] = pert
         pert_level_celltype_metrics.append(ct_prop_metrics)
+
 
         for ct in unique_cell_types:
             adata_true_ct = adata_true_pert[adata_true_pert.obs[cell_type_key] == ct]
@@ -1271,7 +1473,7 @@ def evaluate_stratified_by_celltype(
                     top_n=deg_top_n_for_eval,
                 )
 
-                if len(true_deg50) == 0:
+                if len(true_deg50) <= 10:
                     row["gene_mse_deg50_per_celltype"] = np.nan
                     row["gene_r2_deg50_per_celltype"] = np.nan
                     row["gene_mse_identity_deg50_per_celltype"] = np.nan
@@ -1401,9 +1603,13 @@ def _make_pred_adata_from_control(
     cytokine_key,
     mass_value=1.0,
     copy_obs_meta=True,
+    source_celltype_key: str | None = None,
+    source_celltype_store_col: str = "source_celltype",
+    source_obs_store_col: str = "source_obs_name",
 ):
     """
     基于 control population 的细胞数和 obs 生成 baseline 预测 AnnData。
+    并可选保存 source celltype / source obs name，用于后续 transition-based evaluation。
     """
     if copy_obs_meta:
         obs = ctrl_adata.obs.copy()
@@ -1415,12 +1621,23 @@ def _make_pred_adata_from_control(
     obs[cytokine_key] = cytokine_value
     obs["mass"] = float(mass_value)
 
+    # 保存 source 追踪信息
+    obs[source_obs_store_col] = ctrl_adata.obs_names.astype(str)
+
+    if source_celltype_key is not None:
+        if source_celltype_key not in ctrl_adata.obs.columns:
+            raise ValueError(
+                f"source_celltype_key='{source_celltype_key}' not found in ctrl_adata.obs"
+            )
+        obs[source_celltype_store_col] = ctrl_adata.obs[source_celltype_key].astype(str).values
+
     pred_adata = ad.AnnData(
         X=np.asarray(X_pred, dtype=np.float32),
         obs=obs,
         var=ctrl_adata.var.copy(),
     )
     return pred_adata
+
 
 
 def _precompute_train_and_ctrl_means(
@@ -1532,7 +1749,11 @@ def build_baseline_results(
     min_reference_groups=1,
     fallback_to_identity=True,
     verbose=True,
+    source_celltype_key: str | None = None,
+    source_celltype_store_col: str = "source_celltype",
+    source_obs_store_col: str = "source_obs_name",
 ):
+
     """
     构建 baseline results:
     - identity
@@ -1551,6 +1772,19 @@ def build_baseline_results(
         adata_obj.obs[donor_key] = adata_obj.obs[donor_key].astype(str)
         adata_obj.obs[cytokine_key] = adata_obj.obs[cytokine_key].astype(str)
         adata_obj.obs[pert_key] = adata_obj.obs[pert_key].astype(str)
+        if source_celltype_key is not None:
+            if source_celltype_key not in adata_control.obs.columns:
+                raise ValueError(
+                    f"source_celltype_key='{source_celltype_key}' not found in adata_control.obs"
+                )
+            adata_control.obs[source_celltype_key] = adata_control.obs[source_celltype_key].astype(str)
+    
+            if source_celltype_key in adata_train.obs.columns:
+                adata_train.obs[source_celltype_key] = adata_train.obs[source_celltype_key].astype(str)
+    
+            if source_celltype_key in adata_treated.obs.columns:
+                adata_treated.obs[source_celltype_key] = adata_treated.obs[source_celltype_key].astype(str)
+
 
     train_meta_df = adata_train.obs[[pert_key, donor_key, cytokine_key]].drop_duplicates()
 
@@ -1601,6 +1835,18 @@ def build_baseline_results(
             if verbose:
                 print(f"⚠️ Skip {pert}: no matched control found.")
             continue
+
+        source_celltype = None
+        source_obs_names = target_ctrl.obs_names.astype(str).to_numpy()
+
+        if source_celltype_key is not None:
+            if source_celltype_key not in target_ctrl.obs.columns:
+                raise ValueError(
+                    f"source_celltype_key='{source_celltype_key}' not found in matched control obs "
+                    f"for perturbation {pert}"
+                )
+            source_celltype = target_ctrl.obs[source_celltype_key].astype(str).to_numpy()
+
 
         X_ctrl = adata_to_numpy(target_ctrl)
         Z_ctrl = get_embedding(target_ctrl, embedding_key)
@@ -1669,13 +1915,20 @@ def build_baseline_results(
             cytokine_key=cytokine_key,
             mass_value=mass_value,
             copy_obs_meta=copy_obs_meta,
+            source_celltype_key=source_celltype_key,
+            source_celltype_store_col=source_celltype_store_col,
+            source_obs_store_col=source_obs_store_col,
         )
+
         results_genes[pert] = pred_adata
 
         results_embedding[pert] = {
             "z_pred": np.asarray(Z_pred, dtype=np.float32),
             "m_pred": np.full(Z_pred.shape[0], float(mass_value), dtype=np.float32),
+            "source_obs_names": source_obs_names,
+            "source_celltype": source_celltype,
         }
+
 
     if verbose:
         print(

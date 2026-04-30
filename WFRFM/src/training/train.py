@@ -20,6 +20,7 @@ def train_model(adata_control, adata_treated, adata_test,
                 batch_size_per_condition=256,
                 batch_size_condition=10,
                 sample_rep="X_pca_scaled", 
+                condition_keys = "cytokine",
                 condition_rep_keys="gene_embeddings",
                 device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                 save_path=None,
@@ -31,6 +32,7 @@ def train_model(adata_control, adata_treated, adata_test,
     train_loader = DataLoaderHelper(
         adata_control, adata_treated, ot_results_train,
         sample_rep=sample_rep,
+        condition_keys=condition_keys,
         condition_rep_keys=condition_rep_keys
     )
     
@@ -39,6 +41,7 @@ def train_model(adata_control, adata_treated, adata_test,
         test_loader = DataLoaderHelper(
             adata_control, adata_test, ot_results_test,
             sample_rep=sample_rep,
+            condition_keys=condition_keys,
             condition_rep_keys=condition_rep_keys
         )
     
