@@ -14,6 +14,74 @@
   line-height: 1.05 !important;
   letter-spacing: -.01em !important;
 }
+
+.hero-actions {
+  gap: 18px !important;
+  margin-top: 38px !important;
+}
+.hero-actions .button {
+  position: relative;
+  min-height: 68px !important;
+  padding: 0 32px !important;
+  border-radius: 22px !important;
+  font-size: 17px !important;
+  font-weight: 950 !important;
+  letter-spacing: .01em !important;
+  overflow: hidden;
+  isolation: isolate;
+}
+.hero-actions .button:before {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border-radius: 20px;
+  background: linear-gradient(135deg, rgba(255,255,255,.62), rgba(255,255,255,0));
+  opacity: .92;
+  z-index: -1;
+}
+.hero-actions .button:after {
+  content: "->" !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-left: 13px !important;
+  border-radius: 50%;
+  background: rgba(255,255,255,.68);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.72);
+  font-size: 15px;
+  line-height: 1;
+}
+.hero-actions .button.primary {
+  color: #052f35 !important;
+  background:
+    radial-gradient(circle at 18% 18%, rgba(255,255,255,.78), transparent 34%),
+    linear-gradient(135deg, #65ddea 0%, #a8f3c4 56%, #d9f8e5 100%) !important;
+  border: 1px solid rgba(31,183,201,.42) !important;
+  box-shadow:
+    0 22px 46px rgba(31,183,201,.26),
+    0 8px 18px rgba(107,211,155,.16),
+    inset 0 0 0 1px rgba(255,255,255,.70) !important;
+}
+.hero-actions .button.ghost {
+  color: #3d3470 !important;
+  background:
+    radial-gradient(circle at 18% 18%, rgba(255,255,255,.82), transparent 34%),
+    linear-gradient(135deg, rgba(255,255,255,.96), rgba(239,235,255,.92) 58%, rgba(223,247,250,.86)) !important;
+  border: 1px solid rgba(143,122,230,.34) !important;
+  box-shadow:
+    0 20px 42px rgba(82,78,132,.15),
+    inset 0 0 0 1px rgba(255,255,255,.76) !important;
+}
+.hero-actions .button:hover {
+  transform: translateY(-4px) scale(1.015) !important;
+  filter: saturate(1.05);
+}
+.hero-actions .button:focus-visible {
+  outline: 3px solid rgba(31,183,201,.42);
+  outline-offset: 4px;
+}
 .interaction-hint {
   position: absolute;
   z-index: 12;
