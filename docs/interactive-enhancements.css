@@ -1,0 +1,249 @@
+/* Interactive attention and result-summary layer.
+   Kept separate from style.css so new demo affordances stay easy to audit. */
+
+.condition-map-main,
+.target-button-wrap {
+  position: relative;
+}
+.condition-colorbar-panel {
+  position: relative;
+}
+.demo1-inner-title {
+  padding: 10px 16px !important;
+  font-size: 17px !important;
+  line-height: 1.05 !important;
+  letter-spacing: -.01em !important;
+}
+.interaction-hint {
+  position: absolute;
+  z-index: 12;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid rgba(255,138,115,.34);
+  border-radius: 999px;
+  color: #6e3027;
+  background: linear-gradient(135deg, rgba(255,238,232,.96), rgba(255,255,255,.90));
+  box-shadow: 0 16px 32px rgba(146,70,54,.16), inset 0 0 0 1px rgba(255,255,255,.70);
+  font-size: 12px;
+  font-weight: 950;
+  letter-spacing: .02em;
+  pointer-events: none;
+  animation: attentionPulse 1.7s ease-in-out infinite;
+  transition: opacity .24s ease, transform .24s ease, visibility .24s ease;
+}
+.interaction-hint:before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #ff8a73;
+  box-shadow: 0 0 0 6px rgba(255,138,115,.18);
+}
+.interaction-hint.is-dismissed {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-6px);
+  animation: none;
+}
+.map-hint {
+  top: 46px;
+  right: 18px;
+}
+.target-hint {
+  top: -45px;
+  right: 0;
+}
+@keyframes attentionPulse {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+.interaction-outcome {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid rgba(31,183,201,.16);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 12% 16%, rgba(107,211,155,.16), transparent 38%),
+    rgba(255,255,255,.76);
+  box-shadow: 0 14px 30px rgba(31,64,87,.08), inset 0 0 0 1px rgba(255,255,255,.64);
+}
+.interaction-outcome.compact {
+  margin-top: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.outcome-lede {
+  display: grid;
+  gap: 4px;
+}
+.outcome-lede span {
+  color: #08788a;
+  font-size: 11px;
+  font-weight: 950;
+  letter-spacing: .10em;
+  text-transform: uppercase;
+}
+.outcome-lede b {
+  color: #102033;
+  font-size: 18px;
+  line-height: 1.15;
+  font-weight: 950;
+  letter-spacing: -.02em;
+}
+.outcome-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.outcome-metrics span {
+  display: grid;
+  gap: 4px;
+  padding: 10px 9px;
+  border: 1px solid rgba(31,64,87,.08);
+  border-radius: 14px;
+  background: rgba(255,255,255,.72);
+  min-width: 0;
+}
+.outcome-metrics em {
+  color: #607188;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 950;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.outcome-metrics b {
+  color: #102033;
+  font-size: 18px;
+  font-weight: 950;
+  font-variant-numeric: tabular-nums;
+}
+.interaction-outcome p {
+  margin: 0;
+  color: #526478;
+  font-size: 13px;
+  line-height: 1.45;
+  font-weight: 800;
+}
+
+.demo2-results {
+  grid-template-rows: 1fr auto !important;
+}
+.demo2-result-block {
+  background:
+    radial-gradient(circle at 14% 18%, rgba(143,122,230,.14), transparent 36%),
+    rgba(255,255,255,.70) !important;
+}
+.demo2-result-block:nth-child(2) {
+  background:
+    radial-gradient(circle at 14% 18%, rgba(31,183,201,.13), transparent 36%),
+    rgba(255,255,255,.70) !important;
+}
+.bar-row.target-row {
+  position: relative;
+  padding: 8px;
+  margin: -8px;
+  border: 1px solid rgba(255,138,115,.22);
+  border-radius: 14px;
+  background: rgba(255,238,232,.42);
+}
+.bar-row.target-row label span:first-child:after {
+  content: "target";
+  margin-left: 7px;
+  padding: 3px 6px;
+  border-radius: 999px;
+  color: #8a3c2e;
+  background: rgba(255,255,255,.82);
+  border: 1px solid rgba(255,138,115,.22);
+  font-size: 9px;
+  font-weight: 950;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+
+@media (max-width: 1120px) {
+  .target-hint {
+    top: -42px;
+  }
+}
+@media (max-width: 720px) {
+  .map-hint {
+    top: 42px;
+    right: 12px;
+  }
+  .target-hint {
+    position: relative;
+    top: auto;
+    right: auto;
+    width: fit-content;
+    margin: 8px 0 0;
+  }
+  .outcome-metrics {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Demo 1: give the top-left schematic more presence and reduce dead space. */
+.demo1-left-refined {
+  grid-template-rows: 340px auto !important;
+}
+.figure-demo-panel {
+  height: 340px !important;
+  min-height: 340px !important;
+}
+.condition-map-panel {
+  min-height: 535px !important;
+  height: auto !important;
+  padding-top: 36px !important;
+  align-content: start !important;
+}
+.condition-map-main {
+  width: 100% !important;
+  align-content: start !important;
+}
+#conditionMapCanvas {
+  width: 100% !important;
+  aspect-ratio: 1 / 1 !important;
+  height: auto !important;
+  min-height: 0 !important;
+}
+.condition-colorbar-panel,
+#conditionColorbarCanvas {
+  height: 100% !important;
+  min-height: 0 !important;
+}
+@media (max-width: 1220px) {
+  .demo1-left-refined {
+    grid-template-rows: 285px auto !important;
+  }
+  .figure-demo-panel {
+    height: 285px !important;
+    min-height: 285px !important;
+  }
+  .condition-map-panel {
+    min-height: 500px !important;
+    padding-top: 34px !important;
+  }
+}
+@media (max-width: 720px) {
+  .demo1-left-refined {
+    grid-template-rows: 235px auto !important;
+  }
+  .figure-demo-panel {
+    height: 235px !important;
+    min-height: 235px !important;
+  }
+  .condition-map-panel {
+    min-height: 415px !important;
+    padding-top: 32px !important;
+  }
+}

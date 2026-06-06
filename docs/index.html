@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>U-Pert | Cell-fate design</title>
+  <meta name="description" content="U-Pert paper website: unbalanced perturbation dynamics for virtual-cell prediction and inverse design." />
+  <link rel="stylesheet" href="style.css?v=demo1_schematic_shift_right_down_20260606" />
+  <link rel="stylesheet" href="interactive-enhancements.css?v=20260606" />
+  <!-- Demo1 visual version: balanced-square-demo1 -->
+</head>
+<body>
+  <header class="topbar" id="topbar">
+    <a class="brand" href="#top"><span class="brand-mark">🧬</span><span><b>U-Pert</b><small>Virtual cell design</small></span></a>
+    <nav class="nav"><a href="#top">Overview</a><a href="#demos">Interactive</a><a href="#highlights">Highlights</a><a href="#figures">Figures</a></nav>
+    <a class="nav-cta" href="#demos">Explore interactive results</a>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="hero-bg-bubbles"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+      <div class="hero-content">
+        <div class="eyebrow"><i></i>Single-cell perturbation · birth-death dynamics · inverse design</div>
+        <div class="hero-title-row">
+          <figure class="hero-title-figure">
+            <img src="assets/figure1.png" alt="U-Pert framework figure" />
+            <figcaption>
+              <details class="figure-caption">
+                <summary>Figure 1 Caption</summary>
+                <div class="caption-body">
+                  <p><strong>Overview of the U-Pert framework.</strong></p>
+                  <p><span class="caption-label">a.</span> External perturbations, such as drug treatments or genetic modifications, induce transcriptomic shifts, driving the up- or down-regulation of DEGs.</p>
+                  <p><span class="caption-label">b.</span> Different perturbations lead to substantial variations in total cell counts, driven by altered cellular proliferation and apoptosis capacities, highlighting the necessity of jointly modeling expression and population size changes.</p>
+                  <p><span class="caption-label">c.</span> Schematic of the condition- and context-wise unbalanced flow matching. U-Pert maps initial control distributions to various perturbed states across distinct biological contexts. The continuous state transition is governed by an unbalanced dynamics equation, where the gene velocity field (v<sub>t</sub>) and growth rate (g<sub>t</sub>) account for transcriptomic trajectories and varying cell counts, including division and apoptosis.</p>
+                  <p><span class="caption-label">d.</span> Model inputs and neural network architecture. The framework takes gene expression (x<sub>t</sub>), time (t), and learned embeddings for condition and context to parameterize the velocity and growth networks.</p>
+                  <p><span class="caption-label">e.</span> Forward evolution downstream tasks. U-Pert generalizes to unseen conditions or contexts to predict unobserved cellular responses. Calculation of the Jacobian of the velocity field and the gradient of the growth rate enables mechanistic discovery of condition-specific GRNs and growth-driver genes.</p>
+                  <p><span class="caption-label">f.</span> Inverse design downstream tasks. Given a target transcriptomic state defined by a specific DEG set, U-Pert traces backward to infer the optimal perturbation condition required to achieve it. By explicitly modeling cell birth-death dynamics, U-Pert can identify the optimal condition needed to orchestrate a target macroscopic cell type proportion or count.</p>
+                </div>
+              </details>
+            </figcaption>
+          </figure>
+          <div class="hero-title-copy">
+            <h1>Unbalanced perturbation dynamics for <span>cell-fate design</span></h1>
+            <p class="hero-lede">U-Pert learns how perturbations move cellular transcriptomes and reshape population abundance, enabling virtual-cell simulation and target-driven intervention design from destructive single-cell snapshots.</p>
+            <div class="hero-actions"><a class="button primary" href="#demos">Explore interactive results</a><a class="button ghost" href="#figures">View paper figures</a></div>
+            <div class="hero-tags"><span>Dynamic virtual cells</span><span>Unbalanced perturbation response</span><span>Deep generative models</span><span>Generalization to unseen perturbations</span><span>Cell-fate design</span><span>Birth-death dynamics</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section-pad demos" id="demos">
+      <div class="section-head"><p class="kicker">Interactive results</p><h2>Explore U-Pert predictions and inverse designs.</h2><p>Use the panels below to follow how selected perturbations reshape cell states and population size, and how U-Pert searches for conditions that match a desired endpoint.</p></div>
+      <div class="demo-grid">
+        <article class="demo-card wide atlas-demo demo1-refined">
+          <div class="demo1-panel-heading">
+            <p class="card-label">Interactive forward prediction for unseen perturbations</p>
+          </div>
+          <div class="demo1-left-refined">
+            <div class="figure-demo-panel">
+              <div class="demo1-inner-title">Perturbation effect schematic</div>
+              <img src="assets/figure_demo.png" alt="Interactive forward prediction for unseen perturbations schematic" onerror="this.style.display='none'; this.nextElementSibling.style.display='grid';" />
+              <div class="figure-demo-placeholder">figure_demo.png</div>
+            </div>
+
+            <div class="condition-map-panel refined-card">
+              <div class="demo1-inner-title">Select an unseen perturbation</div>
+              <div class="condition-map-main">
+                <canvas id="conditionMapCanvas" width="680" height="680"></canvas>
+                <div id="demo1MapHint" class="interaction-hint map-hint">Click a perturbation</div>
+                <div id="conditionInfoPanel" class="condition-info-panel refined-info"></div>
+                <select id="conditionSelect" class="bio-select refined-select condition-select-hidden" aria-label="Condition"></select>
+              </div>
+              <div class="condition-colorbar-panel">
+                <canvas id="conditionColorbarCanvas" width="110" height="680"></canvas>
+              </div>
+            </div>
+          </div>
+
+          <div class="trajectory-panel-refined refined-card">
+            <div class="demo1-inner-title">Unbalanced dynamics of unseen perturbations</div>
+            <div class="trajectory-canvas-shell">
+              <div class="trajectory-step-chip" id="trajectoryStepLabel">step = 0</div>
+              <canvas id="forwardCanvas" width="860" height="860"></canvas>
+            </div>
+            <div id="demo1Outcome" class="interaction-outcome"></div>
+          </div>
+        </article>
+        <article class="demo-card demo2-card">
+          <div class="demo2-panel-heading">
+            <p class="card-label">Target-driven inverse design</p>
+          </div>
+          <div class="demo2-controls">
+            <h3>Choose an inverse design type and a specific target.</h3>
+            <div class="demo2-select-stack">
+              <div>
+                <label class="select-label">Task type</label>
+                <div id="demo2TaskTypeButtons" class="demo2-target-buttons demo2-task-type-buttons"></div>
+              </div>
+              <div>
+              <label class="select-label">Target</label>
+                <div class="target-button-wrap">
+                  <div id="demo2TargetButtons" class="demo2-target-buttons"></div>
+                  <div id="demo2TargetHint" class="interaction-hint target-hint">Choose a target</div>
+                </div>
+              </div>
+            </div>
+            <div class="demo2-condition-block">
+              <label class="select-label">Optimal condition</label>
+              <div id="demo2ConditionInfo" class="demo2-condition-info"></div>
+            </div>
+          </div>
+
+          <div class="demo2-trajectory">
+            <div class="demo2-inner-title">Optimized-condition trajectory</div>
+            <div class="trajectory-canvas-shell demo2-canvas-shell">
+              <div class="trajectory-step-chip" id="demo2StepLabel">step = 0</div>
+              <canvas id="demo2Canvas" width="820" height="820"></canvas>
+            </div>
+          </div>
+
+          <aside class="demo2-results">
+            <div class="demo2-result-block">
+              <h4>Final composition</h4>
+              <div id="demo2CompositionBars" class="composition-bars"></div>
+            </div>
+            <div class="demo2-result-block">
+              <h4>Expression shift</h4>
+              <div id="demo2MeanCards" class="demo2-mean-grid"></div>
+            </div>
+          </aside>
+        </article>
+      </div>
+    </section>
+
+    <section class="section-pad highlights" id="highlights">
+      <div class="section-head narrow"><p class="kicker">Highlights</p><h2>From perturbation dynamics to in silico design.</h2><p>U-Pert connects forward response prediction, mechanistic interpretation, and target-driven perturbation design within a unified unbalanced dynamics framework.</p></div>
+      <div class="overview-grid highlights-grid">
+        <article class="concept-card highlight-card">
+          <span class="highlight-index">01</span>
+          <div class="icon flow-icon"></div>
+          <h3>Unbalanced perturbation dynamics</h3>
+          <p class="highlight-lede">Joint modeling of perturbation-induced cell-state transitions and birth-death dynamics.</p>
+          <p>U-Pert learns both transcriptomic state changes and cell proliferation/apoptosis from destructive, unpaired single-cell perturbation snapshots.</p>
+        </article>
+        <article class="concept-card highlight-card">
+          <span class="highlight-index">02</span>
+          <div class="icon cell-icon"></div>
+          <h3>Forward evolution</h3>
+          <p class="highlight-lede">Generalization to unseen perturbations and contexts.</p>
+          <p>Forward simulation predicts unobserved cellular responses while supporting condition- and context-specific mechanism discovery from learned velocity and growth fields.</p>
+        </article>
+        <article class="concept-card highlight-card">
+          <span class="highlight-index">03</span>
+          <div class="icon target-icon"></div>
+          <h3>Inverse design</h3>
+          <p class="highlight-lede">Target-driven search over genetic edits and drug perturbations.</p>
+          <p>Given desired post-perturbation outcomes, such as target DEG programs or cell-type compositions, U-Pert can screen effective genetic edits or drug perturbations in silico.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section-pad figures" id="figures">
+      <div class="section-head">
+        <p class="kicker">Figures</p>
+        <h2>U-Pert across prediction, response, and design.</h2>
+        <p>Read the figures as a short arc: controlled virtual-cell dynamics, genetic perturbation benchmarks, sciPlex drug response, inverse drug design, and cytokine response geometry in primary immune cells.</p>
+      </div>
+      <div class="paper-figure-stack">
+        <figure class="paper-figure-card">
+          <div class="paper-figure-intro">
+            <p class="figure-kicker">Figure 2</p>
+            <h3>Virtual cell prediction and inverse design in a controlled system</h3>
+          </div>
+          <img src="assets/figure2.png" alt="Controlled virtual-cell system results" loading="lazy" />
+          <figcaption>
+            <details class="figure-caption">
+              <summary>Figure 2 Caption</summary>
+              <div class="caption-body">
+                <p><strong>U-Pert enables virtual cell prediction and inverse design in a controlled system.</strong></p>
+                <p><span class="caption-label">a.</span> Schematic of a gene regulatory network (GRN) governing gene expression (X<sub>1</sub>, X<sub>2</sub>, X<sub>3</sub>) and apoptosis dynamics. Perturbations act on transcription rates (&rho;<sub>1</sub>, &rho;<sub>2</sub>) and the apoptosis rate (&alpha;), while other dynamical parameters are held constant.</p>
+                <p><span class="caption-label">b.</span> Forward prediction of virtual cells under perturbations in gene expression space (X<sub>1</sub>-X<sub>2</sub>). Colors denote cell populations, with blue indicating the control and other colors representing perturbed states. Arrows indicate transitions from the control, with parameter changes encoding perturbation effects. Predicted populations closely match ground-truth distributions.</p>
+                <p><span class="caption-label">c.</span> Condition recovery, where designed conditions accurately recapitulate the true perturbation conditions, visualized via a comparison in PCA1-PCA2 space obtained from the projection of three kinetic parameters: transcription rates (&rho;<sub>1</sub>, &rho;<sub>2</sub>) and the apoptosis rate (&alpha;).</p>
+                <p><span class="caption-label">d.</span> Inverse design of differential gene expression, generating cell populations that satisfy target constraints (X<sub>1</sub> down, X<sub>2</sub> up).</p>
+                <p><span class="caption-label">e.</span> Inverse design of cell-type composition, demonstrating controllable transitions and proportions; feasible targets are achieved, whereas theoretically infeasible designs are correctly identified.</p>
+              </div>
+            </details>
+          </figcaption>
+        </figure>
+        <figure class="paper-figure-card">
+          <div class="paper-figure-intro">
+            <p class="figure-kicker">Figure 3</p>
+            <h3>Benchmarking U-Pert on genetic perturbation datasets</h3>
+          </div>
+          <img src="assets/figure3.png" alt="Genetic perturbation benchmark results" loading="lazy" />
+          <figcaption>
+            <details class="figure-caption">
+              <summary>Figure 3 Caption</summary>
+              <div class="caption-body">
+                <p><strong>Benchmarking U-Pert on genetic perturbation datasets.</strong></p>
+                <p><span class="caption-label">a.</span> Different perturbed datasets (Norman, Adamson and Replogle) all exhibit significant imbalance across perturbation conditions. Conditions are ranked within each dataset by observed cell count, and abundance is shown relative to the dataset median.</p>
+                <p><span class="caption-label">b.</span> Gene Ontology enrichment of significantly changed genes in high-abundance Norman perturbation conditions, showing significant enrichment of growth- and cell-death-related biological programs.</p>
+                <p><span class="caption-label">c.</span> Benchmarking of U-Pert against CellFlow, scGPT, GEARS, perturbation-mean and zero-change baselines across Norman, Adamson and Replogle K562. Bars show the mean across held-out perturbation conditions, and points show individual condition-level values. Correlation metrics include R<sup>2</sup>, Pearson correlation and Pearson delta, where Pearson delta evaluates correlation of expression changes relative to control. Error metrics include MSE and MAE. Distributional metrics are W<sub>1</sub> and W<sub>2</sub> distances.</p>
+                <p><span class="caption-label">d.</span> Representative gene-level prediction examples for held-out Norman and Adamson perturbation conditions. Each point represents one gene, with true mean expression on the x-axis and U-Pert-predicted mean expression on the y-axis.</p>
+                <p><span class="caption-label">e.</span> Prediction of perturbation-associated cell-mass changes across all conditions. Pearson and Spearman correlations between observed and predicted mass changes are shown for Adamson, Norman and Replogle, comparing U-Pert with an MLP baseline.</p>
+              </div>
+            </details>
+          </figcaption>
+        </figure>
+        <figure class="paper-figure-card">
+          <div class="paper-figure-intro">
+            <p class="figure-kicker">Figure 4</p>
+            <h3>Transcriptional response and cell-abundance change in sciPlex3</h3>
+          </div>
+          <img src="assets/figure4.png" alt="sciPlex3 results" loading="lazy" />
+          <figcaption>
+            <details class="figure-caption">
+              <summary>Figure 4 Caption</summary>
+              <div class="caption-body">
+                <p><strong>U-Pert jointly predicts transcriptional response and cell-abundance change in sciPlex3.</strong></p>
+                <p><span class="caption-label">a.</span> Overview of the sciPlex3 dataset. It contains 188 compounds profiled across A549, K562 and MCF7 cells, four dose levels and 24 h or 72 h time points.</p>
+                <p><span class="caption-label">b.</span> Recovery of cell-abundance shifts across 124 held-out drug, cell-line, dose and time tuples. The left panel shows observed and predicted cell-abundance fold changes after ranking conditions by observed fold change. The right panel shows prediction gain over a no-change baseline, computed as the reduction in absolute log2 fold-change error. Conditions are grouped by whether the observed fold change lies within the no-change band from 0.8 to 1.25.</p>
+                <p><span class="caption-label">c.</span> Gene-state benchmark across the same held-out tuples. Boxplots compare Identity, CellFlow, CondOT, chemCPA, BioLord and U-Pert using delta-expression correlation and gene-level R2. Higher values indicate better agreement with the observed response.</p>
+                <p><span class="caption-label">d.</span> Zero-shot dose interpolation for belinostat (PXD101) at 24 h in A549, K562 and MCF7 cells. Predicted particle-level mass distributions are shown across a log-spaced dose grid, with observed abundance fold-change points overlaid.</p>
+                <p><span class="caption-label">e.</span> Latent-distribution benchmark across the same held-out tuples. Boxplots show latent energy distance and latent Wasserstein distance, for which lower values indicate better agreement with the observed perturbed distribution.</p>
+                <p><span class="caption-label">f.</span> Velocity-growth decomposition for belinostat at 10 &mu;M and 24 h. Columns show matched control cells, observed perturbed cells, velocity-only predictions, growth-only predictions and full velocity-plus-growth predictions. Grayscale indicates predicted growth weight. In this response, MCF7 was relatively less sensitive and was dominated by velocity-associated state change. K562 was dominated by growth-associated cell loss, whereas A549 required both components.</p>
+              </div>
+            </details>
+          </figcaption>
+        </figure>
+        <figure class="paper-figure-card">
+          <div class="paper-figure-intro">
+            <p class="figure-kicker">Figure 5</p>
+            <h3>Inverse design of drug-induced transcriptional and growth phenotypes</h3>
+          </div>
+          <img src="assets/figure5.png" alt="sciPlex inverse drug design results" loading="lazy" />
+          <figcaption>
+            <details class="figure-caption">
+              <summary>Figure 5 Caption</summary>
+              <div class="caption-body">
+                <p><strong>U-Pert enables inverse design of drug-induced transcriptional and growth phenotypes in sciPlex.</strong></p>
+                <p><span class="caption-label">A.</span> Overview of the inverse-design workflow. A continuous drug embedding is optimized through the trained U-Pert to match a desired perturbation phenotype, and the resulting optimized embedding is mapped back to real compounds by similarity search in an LLM-derived drug-embedding library. The library was constructed by encoding approximately 2,000 ChEMBL-derived drug profiles with an LLM embedding model.</p>
+                <p><span class="caption-label">B.</span> Gene regulation design task, which optimizes for regulating the expression of a given gene list.</p>
+                <p><span class="caption-label">C.</span> Selected drug, Venetoclax, preserves the intended response direction across the target gene set. Target-up genes are shown in red and target-down genes in blue.</p>
+                <p><span class="caption-label">D.</span> Candidate retrieval for the transcriptional design task. Each point represents a real drug inferred by U-Pert after nearest-neighbor retrieval in embedding space. Venetoclax is selected as the validated candidate with a high target-response score.</p>
+                <p><span class="caption-label">E.</span> Broad-killing task, which optimizes for reduced predicted cell mass across all cell types.</p>
+                <p><span class="caption-label">F.</span> Candidate screen for broad killing. Vincristine is retrieved as the selected drug.</p>
+                <p><span class="caption-label">G.</span> U-Pert reveals the dose-response effect of Vincristine.</p>
+                <p><span class="caption-label">H.</span> Selective-killing design task, which targets K562 killing while sparing the other cell lines.</p>
+                <p><span class="caption-label">I.</span> Result of the K562-selective design. The optimized embedding and selected candidate Navitoclax exhibit properties of selective killing of K562 cells.</p>
+                <p><span class="caption-label">J.</span> Candidate ranking for the selective-killing task. Navitoclax ranks highest among screened candidates.</p>
+              </div>
+            </details>
+          </figcaption>
+        </figure>
+        <figure class="paper-figure-card">
+          <div class="paper-figure-intro">
+            <p class="figure-kicker">Figure 6</p>
+            <h3>Cytokine response geometry in PBMCs</h3>
+          </div>
+          <img src="assets/figure6.png" alt="PBMC results" loading="lazy" />
+          <figcaption>
+            <details class="figure-caption">
+              <summary>Figure 6 Caption</summary>
+              <div class="caption-body">
+                <p><strong>U-Pert preserves cytokine response geometry in PBMCs.</strong></p>
+                <p><span class="caption-label">a.</span> The Parse 10M PBMC dataset contains short-term cytokine responses across 12 donors, 90 cytokines and 16 annotated immune cell types.</p>
+                <p><span class="caption-label">b.</span> Diagnostic for implausible cell-type reassignment under forced transport. Balanced transport-based prediction can encourage cross-lineage assignments, whereas U-Pert can modulate mass while retaining local response structure. Lower values indicate fewer assignments inconsistent with the annotated source and target cell types.</p>
+                <p><span class="caption-label">c.</span> Recovery of cytokine response direction across held-out donor settings. Response direction is quantified by cosine similarity between predicted and observed perturbation response vectors and aggregated at the condition level. Points show the median gain of U-Pert relative to CellFlow, and labels report the fraction of held-out cytokine-donor conditions improved by U-Pert. For each setting except 0 seen donors, the donor-generalization analysis was repeated three times.</p>
+                <p><span class="caption-label">d.</span> Lineage-specific response geometry for IFN-&beta; and IL-15. Each subpanel shows observed and predicted response vectors for biology-selected responder contexts at the 6-donor setting. IFN-&beta; examples include CD14 monocytes, CD16 monocytes, conventional dendritic cells, naive B cells and NK cells; IL-15 examples include NK cells, CD56bright NK cells, memory CD8 T cells, naive CD8 T cells and MAIT cells.</p>
+                <p><span class="caption-label">e.</span> Summary benchmark across held-out perturbation metrics. U-Pert is compared with Identity, donor mean, cytokine mean and CellFlow.</p>
+              </div>
+            </details>
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+  </main>
+  <footer class="footer"><span>U-Pert · Unbalanced perturbation dynamics for cell-fate design</span><a href="#top">Back to top ↑</a></footer>
+  <script src="script.js?v=demo2_optimal_condition_box_20260606"></script>
+</body>
+</html>
