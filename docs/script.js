@@ -222,7 +222,7 @@ function drawTypeLegendOverlay(ctx,w,h,{x=w-190,y=142,scale=1.34}={}){
   ctx.fill();
   ctx.stroke();
   ctx.fillStyle="#08788a";
-  ctx.font=`950 ${12*scale}px Inter, system-ui, sans-serif`;
+  ctx.font=`900 ${12*scale}px Inter, system-ui, sans-serif`;
   ctx.textAlign="left";
   ctx.textBaseline="alphabetic";
   ctx.fillText("Cell type",x+12*scale,y+21*scale);
@@ -644,7 +644,7 @@ function setupConditionAtlasDemo(index, meta={}){
     ctx.lineWidth = 1.25;
     ctx.beginPath(); ctx.moveTo(padL,padT); ctx.lineTo(padL,padT+plotH); ctx.lineTo(padL+plotW,padT+plotH); ctx.stroke();
     ctx.fillStyle = "#102033";
-    ctx.font = "950 19px Inter, system-ui, sans-serif";
+    ctx.font = "900 19px Inter, system-ui, sans-serif";
     ctx.textAlign = "center"; ctx.textBaseline="alphabetic";
     ctx.fillText("X1", padL+plotW/2, h-22);
     ctx.save(); ctx.translate(30,padT+plotH/2); ctx.rotate(-Math.PI/2); ctx.fillText("X2",0,0); ctx.restore();
@@ -982,7 +982,7 @@ function setupDemo2(payload){
     ctx.lineWidth=1.25;
     ctx.beginPath(); ctx.moveTo(padL,padT); ctx.lineTo(padL,padT+plotH); ctx.lineTo(padL+plotW,padT+plotH); ctx.stroke();
     ctx.fillStyle="#102033";
-    ctx.font="950 22px Inter, system-ui, sans-serif";
+    ctx.font="900 22px Inter, system-ui, sans-serif";
     ctx.textAlign="center";
     ctx.textBaseline="alphabetic";
     ctx.fillText("X1",padL+plotW/2,h-20);
@@ -1101,8 +1101,19 @@ function setupDemo2(payload){
   refreshTargets();
   requestAnimationFrame(drawDemo2Trajectory);
 }
+async function waitForDisplayFont(){
+  if (!document.fonts) return;
+  const timeout = new Promise(resolve => setTimeout(resolve, 1200));
+  const fontsReady = Promise.all([
+    document.fonts.load("900 64px Inter"),
+    document.fonts.ready
+  ]);
+  await Promise.race([fontsReady, timeout]).catch(() => {});
+}
+
 async function main(){
   try {
+    await waitForDisplayFont();
     setupTopbar();
     const conditionPayload=await loadJsonWithFallback("data/demo1_condition_index.json",{conditions:fallbackConditionIndex()});
     const demo1Payload=normalizeConditionPayload(conditionPayload);

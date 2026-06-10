@@ -1,0 +1,159 @@
+{
+  "modes": [
+    "Cell-type design",
+    "High DEG",
+    "Low DEG"
+  ],
+  "candidates": [
+    {
+      "mode": "Cell-type design",
+      "target": "Type 1",
+      "condition": "Design-\u03b1",
+      "score": 0.91,
+      "mass_fold_change": 1.3,
+      "composition": {
+        "Type 1": 0.82,
+        "Type 2": 0.08,
+        "Type 3": 0.06,
+        "Type 4": 0.04
+      },
+      "x_shift": -0.95,
+      "y_shift": -0.75
+    },
+    {
+      "mode": "Cell-type design",
+      "target": "Type 2",
+      "condition": "Design-\u03b2",
+      "score": 0.95,
+      "mass_fold_change": 1.16,
+      "composition": {
+        "Type 1": 0.07,
+        "Type 2": 0.87,
+        "Type 3": 0.03,
+        "Type 4": 0.03
+      },
+      "x_shift": 1.15,
+      "y_shift": -0.35
+    },
+    {
+      "mode": "Cell-type design",
+      "target": "Type 3",
+      "condition": "Design-\u03b3",
+      "score": 0.92,
+      "mass_fold_change": 0.78,
+      "composition": {
+        "Type 1": 0.06,
+        "Type 2": 0.08,
+        "Type 3": 0.81,
+        "Type 4": 0.05
+      },
+      "x_shift": -1.05,
+      "y_shift": 1.0
+    },
+    {
+      "mode": "Cell-type design",
+      "target": "Type 4",
+      "condition": "Design-\u03b4",
+      "score": 0.87,
+      "mass_fold_change": 1.02,
+      "composition": {
+        "Type 1": 0.12,
+        "Type 2": 0.08,
+        "Type 3": 0.1,
+        "Type 4": 0.7
+      },
+      "x_shift": 0.72,
+      "y_shift": 1.08
+    },
+    {
+      "mode": "High DEG",
+      "target": "X1",
+      "condition": "Design-X1\u2191",
+      "score": 0.89,
+      "mass_fold_change": 1.12,
+      "composition": {
+        "Type 1": 0.68,
+        "Type 2": 0.14,
+        "Type 3": 0.08,
+        "Type 4": 0.1
+      },
+      "x_shift": -0.85,
+      "y_shift": -0.92
+    },
+    {
+      "mode": "High DEG",
+      "target": "X2",
+      "condition": "Design-X2\u2191",
+      "score": 0.93,
+      "mass_fold_change": 0.95,
+      "composition": {
+        "Type 1": 0.1,
+        "Type 2": 0.71,
+        "Type 3": 0.07,
+        "Type 4": 0.12
+      },
+      "x_shift": 1.05,
+      "y_shift": -0.48
+    },
+    {
+      "mode": "High DEG",
+      "target": "X3",
+      "condition": "Design-X3\u2191",
+      "score": 0.84,
+      "mass_fold_change": 0.71,
+      "composition": {
+        "Type 1": 0.14,
+        "Type 2": 0.11,
+        "Type 3": 0.57,
+        "Type 4": 0.18
+      },
+      "x_shift": 1.18,
+      "y_shift": 0.88
+    },
+    {
+      "mode": "Low DEG",
+      "target": "X1",
+      "condition": "Design-X1\u2193",
+      "score": 0.88,
+      "mass_fold_change": 0.86,
+      "composition": {
+        "Type 1": 0.13,
+        "Type 2": 0.52,
+        "Type 3": 0.14,
+        "Type 4": 0.21
+      },
+      "x_shift": 1.06,
+      "y_shift": 0.62
+    },
+    {
+      "mode": "Low DEG",
+      "target": "X2",
+      "condition": "Design-X2\u2193",
+      "score": 0.86,
+      "mass_fold_change": 1.2,
+      "composition": {
+        "Type 1": 0.58,
+        "Type 2": 0.1,
+        "Type 3": 0.11,
+        "Type 4": 0.21
+      },
+      "x_shift": -1.1,
+      "y_shift": -0.12
+    },
+    {
+      "mode": "Low DEG",
+      "target": "X3",
+      "condition": "Design-X3\u2193",
+      "score": 0.83,
+      "mass_fold_change": 1.45,
+      "composition": {
+        "Type 1": 0.36,
+        "Type 2": 0.21,
+        "Type 3": 0.09,
+        "Type 4": 0.34
+      },
+      "x_shift": -0.22,
+      "y_shift": -1.18
+    }
+  ]
+}
